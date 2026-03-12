@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import re
 from typing import Dict, Optional
 
 from modules.form15cb_constants import (
@@ -111,6 +112,24 @@ def _build_name_remittee(beneficiary: str, invoice_no: str, dotted_date: str) ->
     if b and d:
         return f"{b} DT {d}"
     return b
+
+
+_BENEFICIARY_NOISE_PATTERNS = (
+    re.compile(r"\bINVOICE\s*NO\.?\s*[:\-]?\s*.*$", re.IGNORECASE),
+    re.compile(r"\bINVOICE\s*NUMBER\s*[:\-]?\s*.*$", re.IGNORECASE),
+    re.compile(r"\bDT\s+\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b.*$", re.IGNORECASE),
+    re.compile(r"\bNUMBER\s*[:\-]?\s*\S+.*$", re.IGNORECASE),
+)
+
+
+def clean_beneficiary_name(name: str) -> str:
+    """Strip invoice metadata noise from beneficiary name candidates."""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    for pattern in _BENEFICIARY_NOISE_PATTERNS:
+        text = pattern.sub("", text).strip()
+    return text.strip(" .,-")
 
 
 def get_effective_it_rate(rate: float | None = None) -> tuple[float, str]:
@@ -556,7 +575,12 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
     _name_prefix = remitter_name.upper().rstrip(". ")
     if _name_prefix and remitter_address.startswith(_name_prefix):
         remitter_address = remitter_address[len(_name_prefix):].lstrip(" .,;:-").strip()
-    beneficiary = str(form.get("NameRemitteeInput") or extracted.get("beneficiary_name") or form.get("NameRemittee", "")).strip()
+    beneficiary = str(
+        form.get("NameRemitteeInput")
+        or form.get("NameRemittee")
+        or clean_beneficiary_name(str(extracted.get("beneficiary_name") or ""))
+        or ""
+    ).strip()
     # Read invoice number and date from form (user-editable), with fallback to extracted
     invoice_no = str(form.get("InvoiceNumber") or extracted.get("invoice_number") or "").strip()
     invoice_date_iso = str(form.get("InvoiceDate") or extracted.get("invoice_date_iso") or extracted.get("invoice_date_display") or extracted.get("invoice_date_raw") or "").strip()

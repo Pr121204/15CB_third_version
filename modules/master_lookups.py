@@ -4,9 +4,10 @@ import functools
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from modules.logger import get_logger
+from modules.master_data import find_nature_row
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -202,10 +203,78 @@ def load_nature_options() -> List[Dict[str, str]]:
 
 
 @functools.lru_cache(maxsize=1)
+def load_purpose_rows() -> List[Dict[str, Any]]:
+    purpose_list = _load_json(MASTER_DIR / "Purpose_code_List.json", None)
+    if not purpose_list:
+        purpose_list = _load_json(ROOT / "lookups" / "purpose_code_list.json", {"purpose_codes": []})
+    
+    if isinstance(purpose_list, dict):
+        return purpose_list.get("purpose_codes", [])
+    if isinstance(purpose_list, list):
+        return purpose_list
+    return []
+
+
+@functools.lru_cache(maxsize=1)
+def build_purpose_indexes() -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Dict[str, Any]]]:
+    purpose_rows = load_purpose_rows()
+    by_group: Dict[str, List[Dict[str, Any]]] = {}
+    by_code: Dict[str, Dict[str, Any]] = {}
+    for row in purpose_rows:
+        if not isinstance(row, dict):
+            continue
+        group = str(row.get("group_name") or "").strip()
+        code = str(row.get("purpose_code") or "").strip().upper()
+        if group:
+            by_group.setdefault(group, []).append(row)
+        if code:
+            by_code[code] = row
+    return by_group, by_code
+
+
+def resolve_nature_mapping(selected_nature: str, by_code: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    row = find_nature_row(selected_nature) or {}
+    mapped_code = str(row.get("purpose_code") or "").strip().upper()
+    mapped_group = str(row.get("purpose_group") or row.get("service_category") or "").strip()
+
+    if not mapped_group and mapped_code and mapped_code in by_code:
+        mapped_group = str(by_code[mapped_code].get("group_name") or "").strip()
+
+    return {
+        "nature_code": str(row.get("code") or row.get("nature_code") or "").strip(),
+        "nature_label": str(row.get("label") or row.get("description") or selected_nature).strip(),
+        "mapped_purpose_code": mapped_code,
+        "mapped_group_name": mapped_group,
+    }
+
+
+def allowed_groups_for_nature(mapping: Dict[str, str], by_group: Dict[str, List[Dict[str, Any]]], by_code: Dict[str, Dict[str, Any]]) -> List[str]:
+    mapped_group = mapping.get("mapped_group_name", "").strip()
+    mapped_code = mapping.get("mapped_purpose_code", "").strip()
+
+    if mapped_group:
+        return [mapped_group] if mapped_group in by_group else []
+
+    if mapped_code and mapped_code in by_code:
+        group = str(by_code[mapped_code].get("group_name") or "").strip()
+        return [group] if group else []
+
+    # fallback only if no mapping exists at all
+    return sorted(by_group.keys())
+
+
+def allowed_codes_for_groups(groups: List[str], by_group: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for g in groups:
+        rows.extend(by_group.get(g, []))
+    return rows
+
+
+@functools.lru_cache(maxsize=1)
 def load_purpose_grouped() -> Dict[str, List[Dict[str, str]]]:
-    raw = _load_json(MASTER_DIR / "Purpose_code_List.json", {"purpose_codes": []})
+    purpose_rows = load_purpose_rows()
     out: Dict[str, List[Dict[str, str]]] = {}
-    for row in raw.get("purpose_codes", []):
+    for row in purpose_rows:
         if not isinstance(row, dict):
             continue
         group = str(row.get("group_name") or "").strip()

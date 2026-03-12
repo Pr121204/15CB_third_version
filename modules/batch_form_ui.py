@@ -137,6 +137,17 @@ def _selectbox_index_from_value(options: List[str], value: str) -> int:
         return 0
 
 
+def _ensure_linked_text_inputs(key_a: str, key_b: str, initial_value: str) -> None:
+    if key_a not in st.session_state:
+        st.session_state[key_a] = str(initial_value or "")
+    if key_b not in st.session_state:
+        st.session_state[key_b] = str(initial_value or "")
+
+
+def _mirror_text_value(source_key: str, target_key: str) -> None:
+    st.session_state[target_key] = str(st.session_state.get(source_key) or "")
+
+
 def _apply_remitter_match(state: Dict[str, object], remitter_name: str) -> None:
     invoice_id = str(state.get("meta", {}).get("invoice_id") or "")
     form = state["form"]
@@ -512,7 +523,7 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     invoice_number_default = str(form.get("InvoiceNumber") or extracted.get("invoice_number") or "")
     invoice_date_default = str(form.get("InvoiceDate") or extracted.get("invoice_date_iso") or "")
     remitter_address_default = _display_remitter_address(
-        str(form.get("NameRemitterInputRaw") or extracted.get("remitter_name") or ""),
+        str(form.get("NameRemitterInput") or extracted.get("remitter_name") or ""),
         str(form.get("RemitterAddress") or extracted.get("remitter_address") or ""),
     )
 
@@ -521,7 +532,6 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with inv_lc:
         _label("Invoice Number")
     with inv_rc:
-        prev_inv_num = form.get("InvoiceNumber")
         new_inv_num = st.text_input(
             "Invoice Number",
             value=invoice_number_default,
@@ -529,16 +539,11 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             label_visibility="collapsed",
         ).strip()
         form["InvoiceNumber"] = new_inv_num
-        if prev_inv_num is not None and prev_inv_num != new_inv_num:
-            form["NameRemittee"] = compose_name_remittee(
-                str(form.get("NameRemitteeInputRaw", "")), new_inv_num, str(form.get("InvoiceDate", ""))
-            )
 
     inv_lc, inv_rc = st.columns([2, 3])
     with inv_lc:
         _label("Invoice Date (DD/MM/YYYY)")
     with inv_rc:
-        prev_inv_date = form.get("InvoiceDate")
         new_inv_date = st.text_input(
             "Invoice Date",
             value=invoice_date_default,
@@ -547,10 +552,6 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             label_visibility="collapsed",
         ).strip()
         form["InvoiceDate"] = new_inv_date
-        if prev_inv_date is not None and prev_inv_date != new_inv_date:
-            form["NameRemittee"] = compose_name_remittee(
-                str(form.get("NameRemitteeInputRaw", "")), str(form.get("InvoiceNumber", "")), new_inv_date
-            )
 
         if form["InvoiceDate"] and _parse_iso_date(form["InvoiceDate"]) is None:
             st.warning("Invoice Date format should be DD/MM/YYYY.")
@@ -559,7 +560,6 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with inv_lc:
         _label("Remitter Address (as per invoice)")
     with inv_rc:
-        prev_rem_addr = form.get("RemitterAddress")
         new_rem_addr = st.text_area(
             "Remitter Address",
             value=remitter_address_default,
@@ -568,27 +568,25 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             height=80,
         ).strip()
         form["RemitterAddress"] = new_rem_addr
-        if prev_rem_addr is not None and prev_rem_addr != new_rem_addr:
-            form["NameRemitter"] = compose_name_remitter(
-                str(form.get("NameRemitterInputRaw", "")), new_rem_addr
-            )
 
     st.divider()
 
     # Header / preamble block.
-    if "NameRemitterInputRaw" not in form:
-        form["NameRemitterInputRaw"] = str(extracted.get("remitter_name") or "")
-    if "NameRemitteeInputRaw" not in form:
-        form["NameRemitteeInputRaw"] = str(extracted.get("beneficiary_name") or "")
+    if "NameRemitterInput" not in form:
+        form["NameRemitterInput"] = str(extracted.get("remitter_name") or "")
+    if "NameRemitteeInput" not in form:
+        form["NameRemitteeInput"] = str(extracted.get("beneficiary_name") or "")
 
-    if "NameRemitter" not in form:
-        raw_addr = str(form.get("RemitterAddress") or extracted.get("remitter_address") or "")
-        form["NameRemitter"] = compose_name_remitter(form["NameRemitterInputRaw"], raw_addr)
+    form.setdefault("NameRemitter", str(form.get("NameRemitterInput") or ""))
+    form.setdefault("NameRemittee", str(form.get("NameRemitteeInput") or ""))
 
-    if "NameRemittee" not in form:
-        raw_inv_no = str(form.get("InvoiceNumber") or extracted.get("invoice_number") or "")
-        raw_inv_dt = str(form.get("InvoiceDate") or extracted.get("invoice_date_iso") or "")
-        form["NameRemittee"] = compose_name_remittee(form["NameRemitteeInputRaw"], raw_inv_no, raw_inv_dt)
+    beneficiary_header_key = f"{invoice_id}_header_benef_name"
+    beneficiary_section_a_key = f"{invoice_id}_a_benef_name"
+    _ensure_linked_text_inputs(
+        beneficiary_header_key,
+        beneficiary_section_a_key,
+        str(form.get("NameRemitteeInput") or ""),
+    )
 
     pan_default = str(form.get("RemitterPAN") or "")
 
@@ -617,20 +615,20 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             label_visibility="collapsed",
         )
     with h1c4:
-        form["NameRemitter"] = st.text_input(
+        form["NameRemitterInput"] = st.text_input(
             "Name of the Remitter",
-            value=str(form.get("NameRemitter") or ""),
+            value=str(form.get("NameRemitterInput") or ""),
             key=f"{invoice_id}_header_remitter_name",
             placeholder="Name of the Remitter *",
             label_visibility="collapsed",
         ).strip()
-        form["NameRemitterInput"] = form["NameRemitter"]
+        form["NameRemitter"] = form["NameRemitterInput"]
 
-    if form["NameRemitter"]:
+    if form["NameRemitterInput"]:
         prev_lookup_name = str(form.get("_ui_last_remitter_lookup_name") or "")
-        if form["NameRemitter"] != prev_lookup_name:
-            _apply_remitter_match(state, form["NameRemitter"])
-            form["_ui_last_remitter_lookup_name"] = form["NameRemitter"]
+        if form["NameRemitterInput"] != prev_lookup_name:
+            _apply_remitter_match(state, form["NameRemitterInput"])
+            form["_ui_last_remitter_lookup_name"] = form["NameRemitterInput"]
 
     h2c1, h2c2, h2c3, h2c4, h2c5 = st.columns([1.2, 2.1, 0.6, 0.8, 3.4])
     with h2c1:
@@ -654,14 +652,16 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             label_visibility="collapsed",
         )
     with h2c5:
-        form["NameRemittee"] = st.text_input(
+        form["NameRemitteeInput"] = st.text_input(
             "Name of the Beneficiary",
-            value=str(form.get("NameRemittee") or ""),
-            key=f"{invoice_id}_header_benef_name",
+            value=str(form.get("NameRemitteeInput") or ""),
+            key=beneficiary_header_key,
             placeholder="Name of Beneficiary *",
+            on_change=_mirror_text_value,
+            args=(beneficiary_header_key, beneficiary_section_a_key),
             label_visibility="collapsed",
         ).strip()
-        form["NameRemitteeInput"] = form["NameRemittee"]
+        form["NameRemittee"] = form["NameRemitteeInput"]
 
     st.markdown(
         """
@@ -685,13 +685,15 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with lc:
         _label("Name of the Beneficiary of the remittance")
     with rc:
-        st.text_input(
+        form["NameRemitteeInput"] = st.text_input(
             "Name of the Beneficiary of the remittance",
-            value=str(form.get("NameRemittee") or ""),
-            key=f"{invoice_id}_a_benef_name",
-            disabled=True,
+            value=str(form.get("NameRemitteeInput") or ""),
+            key=beneficiary_section_a_key,
+            on_change=_mirror_text_value,
+            args=(beneficiary_section_a_key, beneficiary_header_key),
             label_visibility="collapsed",
-        )
+        ).strip()
+        form["NameRemittee"] = form["NameRemitteeInput"]
 
     section_a_rows = [
         ("Flat / Door / Building", "RemitteeFlatDoorBuilding"),

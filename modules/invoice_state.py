@@ -12,7 +12,7 @@ from modules.form15cb_constants import (
     MODE_TDS,
     PROPOSED_DATE_OFFSET_DAYS,
 )
-from modules.invoice_calculator import recompute_invoice
+from modules.invoice_calculator import clean_beneficiary_name, recompute_invoice
 from modules.logger import get_logger
 from modules.master_lookups import (
     infer_country_from_beneficiary_name,
@@ -418,6 +418,44 @@ def _split_beneficiary_address(address: str) -> tuple[str, str, str]:
     return street, locality, city
 
 
+_ADDRESS_METADATA_PATTERNS = (
+    re.compile(r"\bINVOICE\b", re.IGNORECASE),
+    re.compile(r"\bINVOICE\s*(NO|NUMBER)\b", re.IGNORECASE),
+    re.compile(r"\bNUMBER\s*:\s*\S+.*", re.IGNORECASE),
+    re.compile(r"\bPURCHASE\s+ORDER\b", re.IGNORECASE),
+    re.compile(r"\bPAYMENT\s+TERMS\b", re.IGNORECASE),
+    re.compile(r"\bUNIT\s+PRICE\b", re.IGNORECASE),
+    re.compile(r"\bTOTAL\s+PRICE\b", re.IGNORECASE),
+    re.compile(r"\bTOTAL\s+AMOUNT\b", re.IGNORECASE),
+    re.compile(r"\bCURRENCY\b", re.IGNORECASE),
+    re.compile(r"\bITEM\s+DESCRIPTION\b", re.IGNORECASE),
+    re.compile(r"\bHSN\b", re.IGNORECASE),
+    re.compile(r"\bHS\s*CODE\b", re.IGNORECASE),
+)
+
+
+def _looks_like_polluted_address(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    return any(pattern.search(candidate) for pattern in _ADDRESS_METADATA_PATTERNS)
+
+
+def _sanitize_beneficiary_address_candidate(text: str) -> str:
+    """Trim invoice metadata tails from a beneficiary address candidate."""
+    candidate = " ".join(str(text or "").split()).strip(" ,")
+    if not candidate:
+        return ""
+    cut_positions: list[int] = []
+    for pattern in _ADDRESS_METADATA_PATTERNS:
+        match = pattern.search(candidate)
+        if match:
+            cut_positions.append(match.start())
+    if cut_positions:
+        candidate = candidate[: min(cut_positions)].strip(" ,;:-")
+    return candidate
+
+
 def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, str], config: Dict[str, str]) -> Dict[str, object]:
     mode = config.get("mode", MODE_TDS)
     source_short = config.get("currency_short", "") or str(extracted.get("currency_short") or "").strip().upper()
@@ -473,7 +511,9 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
     )
     # Seed identity/reference fields for review UI from extraction.
     form["NameRemitterInput"] = str(extracted.get("remitter_name") or "").strip()
-    form["NameRemitteeInput"] = str(extracted.get("beneficiary_name") or "").strip()
+    cleaned_beneficiary_name = clean_beneficiary_name(str(extracted.get("beneficiary_name") or ""))
+    form["NameRemitteeInput"] = cleaned_beneficiary_name
+    form["NameRemittee"] = cleaned_beneficiary_name
     form["RemitterAddress"] = str(extracted.get("remitter_address") or "").strip()
     form["InvoiceNumber"] = str(extracted.get("invoice_number") or "").strip()
     form["InvoiceDate"] = str(extracted.get("invoice_date_iso") or "").strip()
@@ -505,10 +545,13 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
     beneficiary_address = fix_concatenated_words(
         normalize_single_line_text(str(extracted.get("beneficiary_address") or ""))
     ).upper()
+    beneficiary_address = _sanitize_beneficiary_address_candidate(beneficiary_address)
     remitter_address = fix_concatenated_words(
         normalize_single_line_text(str(extracted.get("remitter_address") or ""))
     ).upper()
-    beneficiary_name = normalize_single_line_text(str(extracted.get("beneficiary_name") or ""))
+    beneficiary_name = normalize_single_line_text(
+        clean_beneficiary_name(str(extracted.get("beneficiary_name") or ""))
+    )
 
     # Country recovery: if Gemini returned a junk/null country (e.g. "N/A"),
     # attempt to derive the country deterministically from the raw address text
@@ -665,7 +708,7 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
 
     # Structured parse of single-line beneficiary_address for common patterns like:
     # "Musterstraße 12, 70376 Stuttgart" or "70376 Stuttgart, Musterstraße 12".
-    if beneficiary_address:
+    if beneficiary_address and not _looks_like_polluted_address(beneficiary_address):
         try:
             parsed_addr = parse_beneficiary_address(beneficiary_address)
         except Exception:
@@ -693,7 +736,7 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
                 if zip_code and (not form.get("RemitteeZipCode") or str(form.get("RemitteeZipCode") or "") in {"", "999999"}):
                     form["RemitteeZipCode"] = zip_code
     # Fallback split from full beneficiary_address when granular components are missing.
-    if beneficiary_address and (
+    if beneficiary_address and not _looks_like_polluted_address(beneficiary_address) and (
         not form.get("RemitteeFlatDoorBuilding")
         or not form.get("RemitteeTownCityDistrict")
     ):
@@ -704,6 +747,8 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
             form["RemitteeAreaLocality"] = area
         if city and not form.get("RemitteeTownCityDistrict"):
             form["RemitteeTownCityDistrict"] = city
+    elif beneficiary_address and _looks_like_polluted_address(beneficiary_address):
+        logger.warning("state_beneficiary_address_polluted invoice_id=%s address=%r", invoice_id, beneficiary_address)
     # Final fallback for area/locality from zip text if available.
     if not form.get("RemitteeAreaLocality") and extracted.get("beneficiary_zip_text"):
         form["RemitteeAreaLocality"] = str(extracted.get("beneficiary_zip_text") or "")

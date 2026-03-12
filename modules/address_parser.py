@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 # Country names to strip from the end of address strings.
 # Sorted longest-first so "UNITED KINGDOM" is tried before "UK".
@@ -78,6 +78,144 @@ _STREET_PHRASE_RE = re.compile(
     r"Nagar|Marg|Vihar|Chowk|Bazar|Bazaar)",
     re.IGNORECASE,
 )
+
+
+# Brazil-specific helpers ----------------------------------------------------
+
+BRAZIL_STATE_CODES = {
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO",
+    "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI",
+    "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+}
+
+
+def _clean_address_lines(text: str) -> List[str]:
+    raw_parts = re.split(r"[\n\r,]+", str(text or ""))
+    parts: List[str] = []
+    noise_patterns = [
+        r"\bINVOICE\b",
+        r"\bNUMBER\b",
+        r"\bDATE\b",
+        r"\bPAYMENT\s+TERMS\b",
+        r"\bPURCHASE\s+ORDER\b",
+        r"\bCURRENCY\b",
+        r"\bCOUNTRY\s+OF\s+ORIGIN\b",
+        r"\bTOTAL\s+PRICE\b",
+        r"\bUNIT\s+PRICE\b",
+        r"\bCOMMERCIAL\s+INVOICE\b",
+        r"\bPAGE\s*[:/]\b",
+    ]
+    for part in raw_parts:
+        p = re.sub(r"\s+", " ", part).strip(" ,.-")
+        if not p:
+            continue
+        upper = p.upper()
+        if any(re.search(pattern, upper, flags=re.I) for pattern in noise_patterns):
+            continue
+        parts.append(p)
+    return parts
+
+
+def _extract_brazil_zip(text: str) -> str:
+    m = re.search(r"\b(\d{5})-?(\d{3})\b", str(text or ""))
+    if not m:
+        return ""
+    return f"{m.group(1)}{m.group(2)}"
+
+
+def _parse_brazil_address(address_str: str) -> Dict[str, str]:
+    result = {
+        "FlatDoorBuilding": "",
+        "AreaLocality": "",
+        "TownCityDistrict": "",
+        "ZipCode": "",
+    }
+
+    text = str(address_str or "").strip()
+    if not text:
+        return result
+
+    lines = _clean_address_lines(text)
+    if not lines:
+        return result
+
+    zip_code = _extract_brazil_zip(text)
+    if zip_code:
+        result["ZipCode"] = zip_code
+
+    city_line_idx = -1
+    city_name = ""
+    state_code = ""
+
+    # Detect lines like:
+    # Campinas SP 13065900
+    # Campinas SP 13065-900
+    # Campinas - SP - 13065900
+    city_patterns = [
+        r"^(?P<city>[A-Za-zÀ-ÿ'\- ]+?)\s+(?P<state>[A-Z]{2})\s+(?P<zip>\d{5}-?\d{3})$",
+        r"^(?P<city>[A-Za-zÀ-ÿ'\- ]+?)\s*[-,]\s*(?P<state>[A-Z]{2})\s*[-,]?\s*(?P<zip>\d{5}-?\d{3})$",
+        r"^(?P<city>[A-Za-zÀ-ÿ'\- ]+?)\s+(?P<state>[A-Z]{2})$",
+    ]
+
+    for idx, line in enumerate(lines):
+        candidate = re.sub(r"\s+", " ", line).strip()
+        for pattern in city_patterns:
+            m = re.match(pattern, candidate, flags=re.I)
+            if not m:
+                continue
+            maybe_state = (m.groupdict().get("state") or "").upper().strip()
+            if maybe_state not in BRAZIL_STATE_CODES:
+                continue
+            city_line_idx = idx
+            city_name = (m.groupdict().get("city") or "").strip(" ,-")
+            state_code = maybe_state
+            if not result["ZipCode"]:
+                result["ZipCode"] = _extract_brazil_zip(candidate)
+            break
+        if city_line_idx >= 0:
+            break
+
+    if city_name:
+        result["TownCityDistrict"] = city_name
+
+    # For Brazil branch, do not force state code into AreaLocality unless needed.
+    # Keep AreaLocality blank unless there is an extra sub-locality line.
+    address_lines_before_city = lines[:city_line_idx] if city_line_idx >= 0 else lines
+
+    # If first two pre-city fragments seem like a joined highway/street, merge them
+    merged = False
+    if len(address_lines_before_city) >= 2:
+        first = address_lines_before_city[0]
+        second = address_lines_before_city[1]
+        if (
+            len(first) < 40
+            and len(second) < 40
+            and re.search(r"\bKM\b|\bROD\b|\bVIA\b", f"{first} {second}", flags=re.I)
+        ):
+            result["FlatDoorBuilding"] = f"{first}, {second}"
+            merged = True
+            if len(address_lines_before_city) >= 3:
+                result["AreaLocality"] = address_lines_before_city[2]
+        else:
+            result["FlatDoorBuilding"] = first
+            result["AreaLocality"] = second
+    elif address_lines_before_city:
+        result["FlatDoorBuilding"] = address_lines_before_city[0]
+
+    # If there is one more usable line before city, store as locality (unless we already merged)
+    if not merged and len(address_lines_before_city) >= 2 and not result["AreaLocality"]:
+        result["AreaLocality"] = address_lines_before_city[1]
+
+    # If city line not found but we have only 2 lines and second contains ZIP, still infer
+    if not result["TownCityDistrict"] and len(lines) >= 2:
+        second = lines[1]
+        m = re.match(r"^(?P<city>[A-Za-zÀ-ÿ'\- ]+?)\s+(?P<state>[A-Z]{2})\s+(?P<zip>\d{5}-?\d{3})$", second, flags=re.I)
+        if m and (m.group("state") or "").upper() in BRAZIL_STATE_CODES:
+            result["TownCityDistrict"] = m.group("city").strip(" ,-")
+            if not result["ZipCode"]:
+                result["ZipCode"] = _extract_brazil_zip(second)
+
+    return result
 
 
 def _strip_zips(s: str) -> str:
@@ -231,6 +369,23 @@ def parse_beneficiary_address(address_str: str) -> Dict[str, str]:
 
     if not work:
         return result
+
+    # Brazil-specific branch: look for city/state/ZIP patterns and keywords
+    normalized = re.sub(r"\s+", " ", work).strip()
+    has_brazil_zip = bool(re.search(r"\b\d{5}-?\d{3}\b", normalized))
+    has_brazil_keyword = bool(
+        re.search(r"\bBRAZIL\b|\bBRASIL\b|\bCAMPINAS\b", normalized, flags=re.I)
+    )
+    has_city_state_zip = bool(
+        re.search(r"\b[A-Za-zÀ-ÿ'\- ]+\s+[A-Z]{2}\s+\d{5}-?\d{3}\b", normalized)
+    )
+    if has_brazil_keyword or has_city_state_zip:
+        br = _parse_brazil_address(work)
+        if br.get("FlatDoorBuilding") or br.get("TownCityDistrict") or br.get("ZipCode"):
+            result.update({k: v for k, v in br.items() if v})
+            if not result.get("ZipCode"):
+                result["ZipCode"] = "999999"
+            return result
 
     # --- Step 2: Primary split into street / area / city ---
 
