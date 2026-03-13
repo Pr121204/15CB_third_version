@@ -817,6 +817,20 @@ def _finalize_extracted_fields(extracted: Dict[str, str], context_text: str = ""
                 # Check if the line contains the beneficiary name and isn't JUST a noise label
                 if ben_norm in line_norm:
                     chunk = []
+                    
+                    # Same-line support: Check if there's address-like text after the name
+                    # Example: "Company address: Robert Bosch GmbH, Robert-Bosch-Platz 1, ..."
+                    # We look for the name in the original line to get the suffix
+                    try:
+                        name_match = re.search(re.escape(ben_name).replace(r"\ ", r"\s+"), line, flags=re.IGNORECASE)
+                        if name_match:
+                            suffix = line[name_match.end():].strip(" ,;:-")
+                            # If suffix looks like an address (has digits or is decent length)
+                            if suffix and (any(c.isdigit() for c in suffix) or len(suffix) > 10):
+                                chunk.append(suffix)
+                    except Exception:
+                        pass
+
                     for nxt in lines[idx + 1: idx + 6]:
                         if stop_re.search(nxt):
                             break
@@ -827,7 +841,7 @@ def _finalize_extracted_fields(extracted: Dict[str, str], context_text: str = ""
                         chunk.append(nxt)
                     
                     if chunk:
-                        # Basic validation: Does the chunk look like an address? (contains a digit or significant text)
+                        # Basic validation: Does the chunk look like an address?
                         potential_addr = ", ".join(chunk)
                         if any(c.isdigit() for c in potential_addr) or len(potential_addr) > 15:
                             out["beneficiary_address"] = potential_addr
