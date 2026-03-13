@@ -6,7 +6,7 @@ import uuid
 from typing import Dict, Iterable
 
 from config.settings import OUTPUT_FOLDER
-from modules.form15cb_constants import MODE_NON_TDS, MODE_TDS
+from modules.form15cb_constants import MODE_NON_TDS, MODE_TDS, RATE_TDS_SECB_FLG_DTAA
 
 
 def escape_xml(value):
@@ -70,6 +70,7 @@ def validate_required_fields(fields: Dict[str, str], mode: str = MODE_TDS) -> No
         dtaa_active = (
             str(fields.get("TaxResidCert", "")).strip().upper() == "Y"
             and str(fields.get("OtherRemDtaa", "")).strip().upper() == "N"
+            and str(fields.get("RateTdsSecbFlg", "")).strip() == RATE_TDS_SECB_FLG_DTAA
         )
         if dtaa_active:
             dtaa_required = [
@@ -132,6 +133,24 @@ def _remove_empty_optional_tags(xml_text: str) -> str:
 
 
 def generate_xml_content(xml_fields: Dict[str, str], mode: str = MODE_TDS, template_path: str = "templates/form15cb_template.xml") -> str:
+    # Consistency assertion for debugging
+    if os.getenv("DEBUG", "0").lower() in ("1", "true", "yes"):
+        from modules.form15cb_constants import XML_SENSITIVE_FORM_KEYS
+        from modules.logger import get_logger
+        logger = get_logger()
+        
+        # Filter out keys that are known to be 'input-only' or meta-keys not directly in XML
+        # or keys that are transformed (like NameRemittee vs NameRemitteeInput)
+        EXPECTED_XML_KEYS = {k for k in XML_SENSITIVE_FORM_KEYS if not k.endswith("Input")}
+        # Special case: NameRemitter is computed from NameRemitterInput + Address
+        # RemitterPAN is in XML but might be named PAN in some contexts (it's RemitterPAN in out dict)
+        
+        missing = [k for k in EXPECTED_XML_KEYS if k not in xml_fields]
+        if missing:
+            logger.warning(f"DEBUG: XML consistency check failed. Missing keys in generated field set: {', '.join(sorted(missing))}")
+        else:
+            logger.info("DEBUG: XML consistency check passed.")
+
     validate_required_fields(xml_fields, mode=mode)
     xml_text = _fill_template(xml_fields, template_path)
     xml_text = _remove_empty_optional_tags(xml_text)

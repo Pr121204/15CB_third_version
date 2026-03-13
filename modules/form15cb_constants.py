@@ -18,7 +18,7 @@ HONORIFIC_M_S = "03"
 
 REMITTEE_ZIP_CODE = "999999"
 REMITTEE_STATE = "OUTSIDE INDIA"
-NAME_REMITTEE_DATE_FORMAT = "%Y-%m-%d"
+NAME_REMITTEE_DATE_FORMAT = "%d.%m.%Y"
 PROPOSED_DATE_OFFSET_DAYS = 15
 
 SEC_REM_COVERED_DEFAULT = "SEC. 195 READ WITH SEC. 115A"
@@ -159,3 +159,57 @@ FIELD_MAX_LENGTH = {
     "NatureRemDtaa": 150,
     "ReasonNot": 250,
 }
+
+XML_SENSITIVE_FORM_KEYS = (
+    "InvoiceNumber",
+    "InvoiceDate",
+    "NameRemitterInput",
+    "RemitterAddress",
+    "RemitterPAN",
+    "NameRemitteeInput",
+    "RemitteeFlatDoorBuilding",
+    "RemitteePremisesBuildingVillage",
+    "RemitteeRoadStreet",
+    "RemitteeAreaLocality",
+    "RemitteeTownCityDistrict",
+    "RemitteeState",
+    "RemitteeCountryCode",
+    "RemitteeZipCode",
+    "CountryRemMadeSecb",
+    "CurrencySecbCode",
+    "AmtPayForgnRem",
+    "AmtPayIndRem",
+    "NameBankCode",
+    "BranchName",
+    "BsrCode",
+    "PropDateRem",
+    "NatureRemCategory",
+    "RevPurCategory",
+    "RevPurCode",
+    "TaxPayGrossSecb",
+    "RemittanceCharIndia",
+    "ReasonNot",
+    "SecRemitCovered",
+    "RelevantDtaa",
+    "RelevantArtDtaa",
+    "ArtDtaa",
+    "RateTdsADtaa",
+    "TaxResidCert",
+    "OtherRemDtaa",
+    "NatureRemDtaa",
+    "RelArtDetlDDtaa",
+    "RateTdsSecbFlg",
+    "RateTdsSecB",
+    "DednDateTds",
+    "NameAcctnt",
+    "NameFirmAcctnt",
+    "AcctntFlatDoorBuilding",
+    "PremisesBuildingVillage",
+    "AcctntRoadStreet",
+    "AcctntAreaLocality",
+    "AcctntTownCityDistrict",
+    "AcctntState",
+    "AcctntCountryCode",
+    "AcctntPincode",
+    "MembershipNumber",
+)

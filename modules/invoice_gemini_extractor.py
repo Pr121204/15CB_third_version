@@ -800,23 +800,40 @@ def _finalize_extracted_fields(extracted: Dict[str, str], context_text: str = ""
     context = " ".join(str(context_text or "").split())
 
     # OVERRIDE GEMINI'S BENEFICIARY ADDRESS IF TOP-LEFT SENDER BLOCK FOUND
+    # GUARD: Only override if Gemini failed to find a robust address
+    current_addr = str(out.get("beneficiary_address") or "").strip()
     ben_name = str(out.get("beneficiary_name") or "")
-    if ben_name and context_text:
+    
+    if len(current_addr) < 10 and ben_name and context_text:
         lines = [ln.strip() for ln in context_text.splitlines() if ln.strip()]
         ben_norm = _normalize_for_matching(ben_name)
         if ben_norm:
             stop_re = re.compile(r"(?i)\b(invoice|inv\.?\s*no|date|gst|tax|amount|total|po\s*no|email|phone|hsn|sac|bill\s*to|customer|remitter|vat)\b")
+            noise_labels = {"COMPANY", "NAME", "ADDRESS", "INVOICE TO", "SHIP TO"}
+            
             # Search within the first 30 lines (top of page 1)
             for idx, line in enumerate(lines[:30]):
-                if ben_norm in _normalize_for_matching(line):
+                line_norm = _normalize_for_matching(line)
+                # Check if the line contains the beneficiary name and isn't JUST a noise label
+                if ben_norm in line_norm:
                     chunk = []
                     for nxt in lines[idx + 1: idx + 6]:
                         if stop_re.search(nxt):
                             break
+                        # Filter out garbage lines like "COMPANY, /" or just "COMPANY"
+                        nxt_clean = re.sub(r"[^A-Za-z0-9 ]", "", nxt).strip().upper()
+                        if nxt_clean in noise_labels or len(nxt_clean) < 2:
+                            continue
                         chunk.append(nxt)
+                    
                     if chunk:
-                        out["beneficiary_address"] = ", ".join(chunk)
-                        logger.info("beneficiary_address_overridden_from_top_left_block")
+                        # Basic validation: Does the chunk look like an address? (contains a digit or significant text)
+                        potential_addr = ", ".join(chunk)
+                        if any(c.isdigit() for c in potential_addr) or len(potential_addr) > 15:
+                            out["beneficiary_address"] = potential_addr
+                            logger.info("beneficiary_address_overridden_from_top_left_block")
+                        else:
+                            logger.info("beneficiary_address_override_skipped_garbage chunk=%r", potential_addr)
                     break
 
     if not str(out.get("beneficiary_address") or "").strip():

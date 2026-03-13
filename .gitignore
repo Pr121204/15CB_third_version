@@ -10,3 +10,4 @@ data/logs/
 tests_chatgpt/
 tests_claude/
 tests/
+tests/test_invoice_calculator.py

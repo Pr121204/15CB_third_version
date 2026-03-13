@@ -328,11 +328,13 @@ def _is_valid_iso_date(value: str) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    try:
-        datetime.strptime(text, "%Y-%m-%d")
-        return True
-    except ValueError:
-        return False
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            datetime.strptime(text, fmt)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _split_beneficiary_address(address: str) -> tuple[str, str, str]:

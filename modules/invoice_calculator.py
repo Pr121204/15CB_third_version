@@ -563,32 +563,49 @@ def _enforce_field_limits(out: Dict[str, str]) -> Dict[str, str]:
 
 
 def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
+    def _ensure_comma_after_number(value: str) -> str:
+        """Insert a comma after the building number if missing (e.g. "NO. 55 SECOND FLOOR" → "NO. 55, SECOND FLOOR")."""
+        if not value or "," in value:
+            return value
+        m = re.match(r"^(NO\.?\s*\d+)(\s+)(.+)$", value, re.IGNORECASE)
+        if m:
+            return f"{m.group(1)},{m.group(2)}{m.group(3)}"
+        return value
+
     meta = state.get("meta", {})
     extracted = state.get("extracted", {})
     form = state.get("form", {})
     resolved = state.get("resolved", {})
     mode = str(meta.get("mode") or MODE_TDS)
 
-    remitter_name = str(form.get("NameRemitterInput") or extracted.get("remitter_name") or form.get("NameRemitter", "")).strip()
-    remitter_address = str(form.get("RemitterAddress") or extracted.get("remitter_address") or "").strip().upper()
+    def _form_or_extracted(form_key: str, extracted_key: str | None = None, default: str = "") -> str:
+        """Prefer user-edited form values (even empty) over extracted defaults."""
+        if form_key in form:
+            return str(form.get(form_key) or "")
+        if extracted_key:
+            return str(extracted.get(extracted_key) or "")
+        return str(default or "")
+
+    remitter_name = _form_or_extracted("NameRemitterInput", "remitter_name") or _form_or_extracted("NameRemitter")
+    remitter_address = _form_or_extracted("RemitterAddress", "remitter_address").strip().upper()
     # Strip company name if Gemini prepended it to the address (e.g. "Bosch Ltd. Adogodi, Hosur..." → "Adogodi, Hosur...")
     _name_prefix = remitter_name.upper().rstrip(". ")
     if _name_prefix and remitter_address.startswith(_name_prefix):
         remitter_address = remitter_address[len(_name_prefix):].lstrip(" .,;:-").strip()
-    beneficiary = str(
-        form.get("NameRemitteeInput")
-        or form.get("NameRemittee")
+    beneficiary = (
+        _form_or_extracted("NameRemitteeInput")
+        or _form_or_extracted("NameRemittee")
         or clean_beneficiary_name(str(extracted.get("beneficiary_name") or ""))
         or ""
     ).strip()
     # Read invoice number and date from form (user-editable), with fallback to extracted
-    invoice_no = str(form.get("InvoiceNumber") or extracted.get("invoice_number") or "").strip()
-    invoice_date_iso = str(form.get("InvoiceDate") or extracted.get("invoice_date_iso") or extracted.get("invoice_date_display") or extracted.get("invoice_date_raw") or "").strip()
-    parsed_inv_date = _parse_date(invoice_date_iso)
-    if parsed_inv_date:
-        dotted = parsed_inv_date.strftime("%Y-%m-%d")
-    else:
-        dotted = ""
+    invoice_no = _form_or_extracted("InvoiceNumber", "invoice_number").strip()
+    invoice_date_iso = (
+        _form_or_extracted("InvoiceDate", "invoice_date_iso")
+        or _form_or_extracted("InvoiceDate", "invoice_date_display")
+        or _form_or_extracted("InvoiceDate", "invoice_date_raw")
+    ).strip()
+    dotted = format_dotted_date(invoice_date_iso)
 
     name_remitter = f"{remitter_name}. {remitter_address}".strip(". ").strip()
     name_remittee = _build_name_remittee(beneficiary, invoice_no, dotted)
@@ -600,6 +617,9 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
         dtaa_without_article = raw_relevant_dtaa
     if not dtaa_with_article:
         dtaa_with_article = raw_relevant_article
+
+    acctnt_flat = str(form.get("AcctntFlatDoorBuilding") or CA_DEFAULTS.get("AcctntFlatDoorBuilding") or "")
+    acctnt_flat = _ensure_comma_after_number(acctnt_flat)
 
     out: Dict[str, str] = {
         "SWVersionNo": SW_VERSION_NO,
@@ -667,6 +687,7 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
         "DednDateTds": _format_iso(form.get("DednDateTds")),
     }
     out.update(CA_DEFAULTS)
+    out["AcctntFlatDoorBuilding"] = acctnt_flat
     out["NameFirmAcctnt"] = str(form.get("NameFirmAcctnt") or CA_DEFAULTS["NameFirmAcctnt"])
     out["NameAcctnt"] = str(form.get("NameAcctnt") or CA_DEFAULTS["NameAcctnt"])
 

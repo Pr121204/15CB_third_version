@@ -26,6 +26,7 @@ from modules.form15cb_constants import (
 )
 from modules.invoice_calculator import recompute_invoice
 from modules.logger import get_logger
+from modules.invoice_calculator import _build_name_remittee, format_dotted_date
 from modules.master_lookups import (
     get_bank_options,
     load_nature_options,
@@ -490,6 +491,23 @@ def _sync_dtaa_from_country(
         form.setdefault("dtaa_mode", "")
         resolved["dtaa_rate_percent"] = str(form.get("RateTdsADtaa") or "")
 
+    # ── Reset Streamlit session_state for Section 9 widgets so that the
+    # programmatic form update (above) is reflected in the UI immediately.
+    # Without this, the widgets return stale session_state values on the
+    # very next render, which the override detection mistakes for intentional
+    # user edits and locks in the wrong (old) values as permanent overrides.
+    invoice_id = str(state.get("meta", {}).get("invoice_id") or "")
+    if invoice_id:
+        new_rate_display = "" if (rate_text == "it_act" or not rate_text) else rate_text
+        if "_ui_override_sec9_RateTdsADtaa" not in form:
+            st.session_state[f"{invoice_id}_9a_rate"] = new_rate_display
+        if "_ui_override_sec9_RelevantDtaa" not in form:
+            st.session_state[f"{invoice_id}_9_dtaa"] = str(form.get("RelevantDtaa") or "")
+        if "_ui_override_sec9_RelevantArtDtaa" not in form:
+            st.session_state[f"{invoice_id}_9_dtaa_article"] = str(form.get("RelevantArtDtaa") or "")
+        if "_ui_override_sec9_ArtDtaa" not in form:
+            st.session_state[f"{invoice_id}_9a_article"] = str(form.get("ArtDtaa") or "")
+
 
 def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is_single_mode: bool = False) -> Dict[str, object]:
     meta = state.setdefault("meta", {})
@@ -572,21 +590,38 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     st.divider()
 
     # Header / preamble block.
-    if "NameRemitterInput" not in form:
-        form["NameRemitterInput"] = str(extracted.get("remitter_name") or "")
-    if "NameRemitteeInput" not in form:
-        form["NameRemitteeInput"] = str(extracted.get("beneficiary_name") or "")
+    # The UI should display the same composed values that go into XML.
+    # Use form["NameRemitter"] / form["NameRemittee"] when available, otherwise
+    # compose from raw inputs + extracted values.
 
-    form.setdefault("NameRemitter", str(form.get("NameRemitterInput") or ""))
-    form.setdefault("NameRemittee", str(form.get("NameRemitteeInput") or ""))
+    raw_remitter = str(form.get("NameRemitterInput") or extracted.get("remitter_name") or "").strip()
+    raw_remitter_address = str(form.get("RemitterAddress") or extracted.get("remitter_address") or "").strip()
+    display_remitter = str(form.get("NameRemitter") or "").strip()
+    if not display_remitter:
+        display_remitter = compose_name_remitter(raw_remitter, raw_remitter_address)
+        form["NameRemitter"] = display_remitter
+
+    raw_beneficiary = str(form.get("NameRemitteeInput") or extracted.get("beneficiary_name") or "").strip()
+    invoice_no = str(form.get("InvoiceNumber") or extracted.get("invoice_number") or "").strip()
+    invoice_date_iso = str(form.get("InvoiceDate") or extracted.get("invoice_date_iso") or "").strip()
+
+    # Compose the final beneficiary text that is expected in XML
+    composed_beneficiary = compose_name_remittee(raw_beneficiary, invoice_no, invoice_date_iso)
+
+    # If user has not explicitly overridden the beneficiary display, keep it in sync with composition
+    if "_ui_override_name_remittee" not in form:
+        form["NameRemittee"] = composed_beneficiary
+
+    display_beneficiary = str(form.get("NameRemittee") or "").strip()
 
     beneficiary_header_key = f"{invoice_id}_header_benef_name"
     beneficiary_section_a_key = f"{invoice_id}_a_benef_name"
-    _ensure_linked_text_inputs(
-        beneficiary_header_key,
-        beneficiary_section_a_key,
-        str(form.get("NameRemitteeInput") or ""),
-    )
+
+    # Ensure the header and Section A both display the final composed beneficiary string.
+    if beneficiary_header_key not in st.session_state:
+        st.session_state[beneficiary_header_key] = display_beneficiary
+    if beneficiary_section_a_key not in st.session_state:
+        st.session_state[beneficiary_section_a_key] = display_beneficiary
 
     pan_default = str(form.get("RemitterPAN") or "")
 
@@ -615,14 +650,18 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             label_visibility="collapsed",
         )
     with h1c4:
-        form["NameRemitterInput"] = st.text_input(
+        # Show final composed remitter (XML-ready) in the top header field.
+        if f"{invoice_id}_header_remitter_name" not in st.session_state:
+            st.session_state[f"{invoice_id}_header_remitter_name"] = display_remitter
+        new_remitter = st.text_input(
             "Name of the Remitter",
-            value=str(form.get("NameRemitterInput") or ""),
             key=f"{invoice_id}_header_remitter_name",
             placeholder="Name of the Remitter *",
             label_visibility="collapsed",
         ).strip()
-        form["NameRemitter"] = form["NameRemitterInput"]
+        # Keep both the editable input and final XML field in sync so XML generation reflects UI edits.
+        form["NameRemitter"] = new_remitter
+        form["NameRemitterInput"] = new_remitter
 
     if form["NameRemitterInput"]:
         prev_lookup_name = str(form.get("_ui_last_remitter_lookup_name") or "")
@@ -652,16 +691,26 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             label_visibility="collapsed",
         )
     with h2c5:
-        form["NameRemitteeInput"] = st.text_input(
+        # Show final composed beneficiary (XML-ready) in the top header field.
+        # Mirrored into Section A as read-only.
+        if beneficiary_header_key not in st.session_state:
+            st.session_state[beneficiary_header_key] = display_beneficiary
+        if beneficiary_section_a_key not in st.session_state:
+            st.session_state[beneficiary_section_a_key] = display_beneficiary
+
+        new_beneficiary = st.text_input(
             "Name of the Beneficiary",
-            value=str(form.get("NameRemitteeInput") or ""),
             key=beneficiary_header_key,
             placeholder="Name of Beneficiary *",
             on_change=_mirror_text_value,
             args=(beneficiary_header_key, beneficiary_section_a_key),
             label_visibility="collapsed",
         ).strip()
-        form["NameRemittee"] = form["NameRemitteeInput"]
+        if new_beneficiary != display_beneficiary:
+            form["_ui_override_name_remittee"] = new_beneficiary
+        # Keep both the editable input key and the final XML field in sync.
+        form["NameRemittee"] = new_beneficiary
+        form["NameRemitteeInput"] = new_beneficiary
 
     st.markdown(
         """
@@ -685,15 +734,14 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with lc:
         _label("Name of the Beneficiary of the remittance")
     with rc:
-        form["NameRemitteeInput"] = st.text_input(
+        # Section A beneficiary field is a read-only mirror of the final NameRemittee.
+        st.text_input(
             "Name of the Beneficiary of the remittance",
-            value=str(form.get("NameRemitteeInput") or ""),
             key=beneficiary_section_a_key,
-            on_change=_mirror_text_value,
-            args=(beneficiary_section_a_key, beneficiary_header_key),
+            disabled=True,
             label_visibility="collapsed",
-        ).strip()
-        form["NameRemittee"] = form["NameRemitteeInput"]
+        )
+        form["NameRemittee"] = str(st.session_state.get(beneficiary_section_a_key) or "")
 
     section_a_rows = [
         ("Flat / Door / Building", "RemitteeFlatDoorBuilding"),
@@ -1277,9 +1325,11 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             val_dtaa = str(form["_ui_override_sec9_RelevantDtaa"])
         else:
             val_dtaa = fallback_dtaa
+        # Ensure session_state drives the widget value to avoid Streamlit warnings
+        if f"{invoice_id}_9_dtaa" not in st.session_state:
+            st.session_state[f"{invoice_id}_9_dtaa"] = val_dtaa
         new_dtaa = st.text_input(
             "Relevant DTAA",
-            value=val_dtaa,
             key=f"{invoice_id}_9_dtaa",
             label_visibility="collapsed",
         ).strip()
@@ -1298,9 +1348,10 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             val_dtaa_art = fallback_dtaa_art
         if not dtaa_style_active:
             val_dtaa_art = ""
+        if f"{invoice_id}_9_dtaa_article" not in st.session_state:
+            st.session_state[f"{invoice_id}_9_dtaa_article"] = val_dtaa_art
         new_dtaa_art = st.text_input(
             "Relevant Article of DTAA",
-            value=val_dtaa_art,
             key=f"{invoice_id}_9_dtaa_article",
             disabled=(not dtaa_style_active),
             label_visibility="collapsed",
@@ -1395,19 +1446,16 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             val_arta = fallback_arta
         if not section_a_enabled:
             val_arta = ""
+        if f"{invoice_id}_9a_article" not in st.session_state:
+            st.session_state[f"{invoice_id}_9a_article"] = val_arta
         new_arta = st.text_input(
             "Article of DTAA (A)",
-            value=val_arta,
             key=f"{invoice_id}_9a_article",
-            disabled=not section_a_enabled,
             label_visibility="collapsed",
         ).strip()
-        if section_a_enabled and new_arta != fallback_arta:
+        if new_arta != fallback_arta:
             form["_ui_override_sec9_ArtDtaa"] = new_arta
-        if section_a_enabled:
-            form["ArtDtaa"] = new_arta
-        else:
-            form.pop("ArtDtaa", None)
+        form["ArtDtaa"] = new_arta
 
     lc, rc = st.columns(ratio)
     with lc:
@@ -1418,21 +1466,16 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             val_ratea = str(form["_ui_override_sec9_RateTdsADtaa"])
         else:
             val_ratea = fallback_ratea
-        if not section_a_enabled:
-            val_ratea = ""
+        if f"{invoice_id}_9a_rate" not in st.session_state:
+            st.session_state[f"{invoice_id}_9a_rate"] = val_ratea
         new_ratea = st.text_input(
             "Rate of TDS (DTAA A)",
-            value=val_ratea,
             key=f"{invoice_id}_9a_rate",
-            disabled=not section_a_enabled,
             label_visibility="collapsed",
         ).strip()
-        if section_a_enabled and new_ratea != fallback_ratea:
+        if new_ratea != fallback_ratea:
             form["_ui_override_sec9_RateTdsADtaa"] = new_ratea
-        if section_a_enabled:
-            form["RateTdsADtaa"] = new_ratea
-        else:
-            form.pop("RateTdsADtaa", None)
+        form["RateTdsADtaa"] = new_ratea
 
     # 9B UI-only
     form.setdefault("_ui_only_9b_applicable", "Select")
@@ -1685,11 +1728,17 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         _label("In foreign currency", indent=1)
     with rc:
         fallback_amt_fc = str(preview_form_after_9.get("AmtPayForgnTds") or form.get("AmtPayForgnTds") or "")
+        # If the computed value changed upstream (e.g. DTAA rate or FCY changed) and the
+        # user has no active manual override, sync session_state so the widget shows the
+        # new computed value instead of locking in a stale value as a false override.
+        key_amt_fc = f"{invoice_id}_10_amt_fc"
+        if "_ui_override_sec10_AmtPayForgnTds" not in form:
+            if key_amt_fc not in st.session_state or form.get("AmtPayForgnTds") != fallback_amt_fc:
+                st.session_state[key_amt_fc] = fallback_amt_fc
         val_amt_fc = str(form.get("_ui_override_sec10_AmtPayForgnTds", fallback_amt_fc))
         new_amt_fc = st.text_input(
             "TDS in foreign currency",
-            value=val_amt_fc,
-            key=f"{invoice_id}_10_amt_fc",
+            key=key_amt_fc,
             label_visibility="collapsed",
         ).strip()
         if new_amt_fc != fallback_amt_fc:
@@ -1701,11 +1750,14 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         _label("In Indian Rs", indent=1)
     with rc:
         fallback_amt_inr = str(preview_form_after_9.get("AmtPayIndianTds") or form.get("AmtPayIndianTds") or "")
+        key_amt_inr = f"{invoice_id}_10_amt_inr"
+        if "_ui_override_sec10_AmtPayIndianTds" not in form:
+            if key_amt_inr not in st.session_state or form.get("AmtPayIndianTds") != fallback_amt_inr:
+                st.session_state[key_amt_inr] = fallback_amt_inr
         val_amt_inr = str(form.get("_ui_override_sec10_AmtPayIndianTds", fallback_amt_inr))
         new_amt_inr = st.text_input(
             "TDS in INR",
-            value=val_amt_inr,
-            key=f"{invoice_id}_10_amt_inr",
+            key=key_amt_inr,
             label_visibility="collapsed",
         ).strip()
         if new_amt_inr != fallback_amt_inr:
@@ -1753,11 +1805,14 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             )
 
         fallback_rate = str(preview_form_after_9.get("RateTdsSecB") or form.get("RateTdsSecB") or "")
+        key_rate = f"{invoice_id}_11_rate"
+        if "_ui_override_sec11_RateTdsSecB" not in form:
+            if key_rate not in st.session_state or form.get("RateTdsSecB") != fallback_rate:
+                st.session_state[key_rate] = fallback_rate
         val_rate = str(form.get("_ui_override_sec11_RateTdsSecB", fallback_rate))
         new_rate = st.text_input(
             "Rate of TDS value",
-            value=val_rate,
-            key=f"{invoice_id}_11_rate",
+            key=key_rate,
             label_visibility="collapsed",
         ).strip()
         if new_rate != fallback_rate:
@@ -1769,11 +1824,14 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         _label("12. Actual amount of remittance after TDS (In foreign currency)")
     with rc:
         fallback_actl = str(preview_form_after_9.get("ActlAmtTdsForgn") or form.get("ActlAmtTdsForgn") or "")
+        key_actl = f"{invoice_id}_12_actl_remit"
+        if "_ui_override_sec12_ActlAmtTdsForgn" not in form:
+            if key_actl not in st.session_state or form.get("ActlAmtTdsForgn") != fallback_actl:
+                st.session_state[key_actl] = fallback_actl
         val_actl = str(form.get("_ui_override_sec12_ActlAmtTdsForgn", fallback_actl))
         new_actl = st.text_input(
             "Actual remittance after TDS",
-            value=val_actl,
-            key=f"{invoice_id}_12_actl_remit",
+            key=key_actl,
             label_visibility="collapsed",
         ).strip()
         if new_actl != fallback_actl:
@@ -1793,12 +1851,15 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             base_date_val = str(form.get("DednDateTds") or "")
 
         fallback_date = str(preview_form_after_9.get("DednDateTds") or base_date_val)
+        key_dedn_date = f"{invoice_id}_13_dedn_date"
+        if "_ui_override_sec13_DednDateTds" not in form:
+            if key_dedn_date not in st.session_state or form.get("DednDateTds") != fallback_date:
+                st.session_state[key_dedn_date] = fallback_date
         val_date = str(form.get("_ui_override_sec13_DednDateTds", fallback_date))
         
         new_date = st.text_input(
             "Date of deduction",
-            value=val_date,
-            key=f"{invoice_id}_13_dedn_date",
+            key=key_dedn_date,
             label_visibility="collapsed",
             placeholder="DD/MM/YYYY",
         ).strip()

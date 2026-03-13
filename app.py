@@ -61,7 +61,7 @@ st.markdown("""
 from pdf2image import convert_from_bytes
 
 from modules.zip_intake import parse_zip, read_excel, build_invoice_registry
-from modules.form15cb_constants import ALL_CURRENCY_OPTIONS, IT_ACT_RATE_DEFAULT, IT_ACT_RATES, MODE_NON_TDS, MODE_TDS, SHORT_CURRENCY_OPTIONS
+from modules.form15cb_constants import ALL_CURRENCY_OPTIONS, IT_ACT_RATE_DEFAULT, IT_ACT_RATES, MODE_NON_TDS, MODE_TDS, SHORT_CURRENCY_OPTIONS, XML_SENSITIVE_FORM_KEYS
 from modules.invoice_state import build_invoice_state
 from modules.invoice_calculator import invoice_state_to_xml_fields, recompute_invoice
 from modules.invoice_gemini_extractor import (
@@ -131,59 +131,7 @@ def _get_current_state() -> dict:
     return st.session_state[f"{mode}_mode"]
 
 
-XML_SENSITIVE_FORM_KEYS = (
-    "InvoiceNumber",
-    "InvoiceDate",
-    "NameRemitterInput",
-    "RemitterAddress",
-    "RemitterPAN",
-    "NameRemitteeInput",
-    "RemitteeFlatDoorBuilding",
-    "RemitteePremisesBuildingVillage",
-    "RemitteeRoadStreet",
-    "RemitteeAreaLocality",
-    "RemitteeTownCityDistrict",
-    "RemitteeState",
-    "RemitteeCountryCode",
-    "RemitteeZipCode",
-    "CountryRemMadeSecb",
-    "CurrencySecbCode",
-    "AmtPayForgnRem",
-    "AmtPayIndRem",
-    "NameBankCode",
-    "BranchName",
-    "BsrCode",
-    "PropDateRem",
-    "NatureRemCategory",
-    "RevPurCategory",
-    "RevPurCode",
-    "TaxPayGrossSecb",
-    "RemittanceCharIndia",
-    "ReasonNot",
-    "SecRemitCovered",
-    "RelevantDtaa",
-    "RelevantArtDtaa",
-    "ArtDtaa",
-    "RateTdsADtaa",
-    "TaxResidCert",
-    "OtherRemDtaa",
-    "NatureRemDtaa",
-    "RelArtDetlDDtaa",
-    "RateTdsSecbFlg",
-    "RateTdsSecB",
-    "DednDateTds",
-    "NameAcctnt",
-    "NameFirmAcctnt",
-    "AcctntFlatDoorBuilding",
-    "PremisesBuildingVillage",
-    "AcctntRoadStreet",
-    "AcctntAreaLocality",
-    "AcctntTownCityDistrict",
-    "AcctntState",
-    "AcctntCountryCode",
-    "AcctntPincode",
-    "MembershipNumber",
-)
+# XML_SENSITIVE_FORM_KEYS moved to modules/form15cb_constants.py
 
 
 def _has_xml_sensitive_form_changes(old_form: Dict[str, Any], new_form: Dict[str, Any]) -> bool:
