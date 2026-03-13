@@ -1842,13 +1842,12 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with lc:
         _label("13. Date of deduction of tax at source, if any")
     with rc:
-        if is_tds_mode:
-            _parsed = _parse_iso_date(str(form.get("DednDateTds") or ""))
-            if _parsed is None and str(form.get("DednDateTds") or "").strip():
-                st.warning("Existing deduction date is invalid. Expected DD/MM/YYYY.")
-            base_date_val = str(form.get("DednDateTds") or _default_dedn_date(form, meta).strftime("%d/%m/%Y"))
-        else:
-            base_date_val = str(form.get("DednDateTds") or "")
+        _parsed = _parse_iso_date(str(form.get("DednDateTds") or ""))
+        if _parsed is None and str(form.get("DednDateTds") or "").strip():
+            st.warning("Existing deduction date is invalid. Expected DD/MM/YYYY.")
+        
+        # Use default logic (which checks config/meta) even in non-TDS mode
+        base_date_val = str(form.get("DednDateTds") or _default_dedn_date(form, meta).strftime("%d/%m/%Y"))
 
         fallback_date = str(preview_form_after_9.get("DednDateTds") or base_date_val)
         key_dedn_date = f"{invoice_id}_13_dedn_date"

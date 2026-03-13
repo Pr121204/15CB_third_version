@@ -1,0 +1,15 @@
+[
+  {
+    "beneficiary_name": "Robert Bosch",
+    "beneficiary_country": "DE",
+    "beneficiary_address": "Robert-Bosch-Platz 1, DE-70839 Gerlingen-Schillerhoehe",
+    "remitter_country": "India",
+    "remitter_name": "Bosch Rexroth",
+    "remitter_address": "Limited, Sanand Viramgam Highway, Ahmedabad - 382170",
+    "invoice_number": "70616222",
+    "invoice_date": "24.02.2026",
+    "currency": "USD",
+    "amount_foreign": "174,943.30",
+    "file": "70616222.pdf"
+  }
+]

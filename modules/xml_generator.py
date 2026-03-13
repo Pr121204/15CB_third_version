@@ -155,7 +155,7 @@ def generate_xml_content(xml_fields: Dict[str, str], mode: str = MODE_TDS, templ
     xml_text = _fill_template(xml_fields, template_path)
     xml_text = _remove_empty_optional_tags(xml_text)
     if mode == MODE_NON_TDS:
-        for tag in ("RateTdsSecbFlg", "RateTdsSecB", "DednDateTds"):
+        for tag in ("RateTdsSecbFlg", "RateTdsSecB"):
             xml_text = _remove_tag_block(xml_text, tag)
     return xml_text
 
@@ -171,7 +171,7 @@ def build_xml_fields_by_mode(state: Dict[str, object]) -> Dict[str, str]:
         out["AmtPayIndianTds"] = "0"
         out["RateTdsSecbFlg"] = ""
         out["RateTdsSecB"] = ""
-        out["DednDateTds"] = ""
+        # out["DednDateTds"] = ""  # Mapping Deduction Date in non-tds mode
     return out
 
 

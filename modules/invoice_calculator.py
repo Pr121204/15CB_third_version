@@ -37,7 +37,7 @@ from modules.form15cb_constants import (
     XML_CREATED_BY,
 )
 from modules.logger import get_logger
-from modules.master_lookups import split_dtaa_article_text
+from modules.master_lookups import split_dtaa_article_text, load_nature_options
 
 
 logger = get_logger()
@@ -103,13 +103,19 @@ def _is_integer_rate(value: float | None) -> bool:
 
 def _build_name_remittee(beneficiary: str, invoice_no: str, dotted_date: str) -> str:
     b = str(beneficiary or "").strip().upper()
-    inv = str(invoice_no or "").strip()
-    d = str(dotted_date or "").strip()
-    if b and inv and d:
+    inv = str(invoice_no or "").strip().upper()
+    d = str(dotted_date or "").strip().upper()
+    
+    # If the beneficiary name already contains the invoice number or date, 
+    # don't append it again to avoid "INV-123 INV-123" redundancy.
+    has_inv = inv and (inv in b or f"INV" in b)
+    has_date = d and (d in b)
+
+    if b and inv and d and not (has_inv or has_date):
         return f"{b} INVOICE NO. {inv} DT {d}"
-    if b and inv:
+    if b and inv and not has_inv:
         return f"{b} INVOICE NO. {inv}"
-    if b and d:
+    if b and d and not has_date:
         return f"{b} DT {d}"
     return b
 
@@ -239,6 +245,8 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         selected_it_rate = 20.80
         form["ItActRateSelected"] = "20.8"
         form["dtaa_mode"] = "it_act"
+        # Force RateTdsSecbFlg to IT Act ("1") so RemForRoyFlg becomes "N" downstream
+        form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_IT_ACT
 
     # --- PRIORITY 1: GROSS-UP FLOW ---
     if mode == MODE_TDS and is_gross_up:
@@ -441,7 +449,7 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         form["RemForRoyFlg"] = "Y" if non_tds_rate_mode == "dtaa" else "N"
         form["RateTdsSecbFlg"] = ""
         form["RateTdsSecB"] = ""
-        form["DednDateTds"] = ""
+        # form["DednDateTds"] = ""  # Removed to allow "Deduction Date" mapping in non-tds mode
         # DTAA tax fields must be absent in non-TDS XML
         form["TaxIncDtaa"] = ""
         form["TaxLiablDtaa"] = ""
@@ -610,7 +618,12 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
     ).strip()
     dotted = format_dotted_date(invoice_date_iso)
 
-    name_remitter = f"{remitter_name}. {remitter_address}".strip(". ").strip()
+    name_remitter = remitter_name.strip()
+    # Only append address if it's not already visibly a part of the remitter name 
+    # (avoiding duplication from Gemini extraction)
+    if remitter_address and remitter_address not in name_remitter.upper():
+        name_remitter = f"{name_remitter}. {remitter_address}".strip(". ").strip()
+    
     name_remittee = _build_name_remittee(beneficiary, invoice_no, dotted)
     raw_relevant_dtaa = str(form.get("RelevantDtaa") or "").strip()
     raw_relevant_article = str(form.get("RelevantArtDtaa") or form.get("ArtDtaa") or "").strip()
@@ -749,7 +762,29 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
 
     out["RemForRoyFlg"] = "Y" if dtaa_claimed else "N"
 
-    out["OtherRemDtaa"] = "N" if mode == MODE_TDS else other_rem_dtaa
+    # If treaty is not claimed (IT Act rate case), OtherRemDtaa must be "Y" 
+    # to signal that treaty article details are omitted / not applied.
+    # In MODE_TDS, we set it to "N" only if DTAA is explicitly claimed.
+    other_rem_dtaa_val = other_rem_dtaa if mode != MODE_TDS else ("N" if dtaa_claimed else "Y")
+    out["OtherRemDtaa"] = other_rem_dtaa_val
+
+    # If OtherRemDtaa is "Y", ensure NatureRemDtaa is not blank.
+    if other_rem_dtaa_val == "Y" and not out.get("NatureRemDtaa"):
+        # 1. Try to resolve label from NatureRemCategory code
+        cat_code = str(out.get("NatureRemCategory") or "").strip()
+        label = ""
+        if cat_code:
+            options = load_nature_options()
+            for opt in options:
+                if str(opt.get("code")).strip() == cat_code:
+                    label = str(opt.get("label") or "").strip()
+                    break
+        
+        # 2. Fallback to AI-extracted nature or default
+        if not label:
+            label = str(form.get("nature_of_remittance") or "FEES FOR TECHNICAL SERVICES").strip()
+        
+        out["NatureRemDtaa"] = label
 
     # For non-chargeable remittance, keep reason text and suppress IT Act tax block fields.
     if str(out.get("RemittanceCharIndia") or "Y").strip().upper() != "Y":
