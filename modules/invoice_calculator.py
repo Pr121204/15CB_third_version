@@ -351,6 +351,7 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         form["AmtPayForgnTds"] = _fmt_num(float(tds_fcy_dec))
         form["AmtPayIndianTds"] = _fmt_num(_round_to_int(float(tds_inr_dec)))
         form["ActlAmtTdsForgn"] = _fmt_num(float(actual_fcy))
+        form["RemForRoyFlg"] = "Y" if dtaa_claimed else "N"
 
         form["BasisDeterTax"] = it_basis
         form["RemittanceCharIndia"] = "Y"
@@ -380,6 +381,7 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_IT_ACT
         form.setdefault("RemittanceCharIndia", "Y")
         form["OtherRemDtaa"] = "N"
+        form["RemForRoyFlg"] = "N"
         # Clear DTAA-specific fields since we're using IT Act
         form["TaxIncDtaa"] = ""
         form["TaxLiablDtaa"] = ""
@@ -436,6 +438,7 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         form["ActlAmtTdsForgn"] = _fmt_num(fcy)
         # Respect UI selection from Section 9D in NON_TDS (default remains "Y").
         form["OtherRemDtaa"] = str(form.get("OtherRemDtaa") or "Y").strip().upper()
+        form["RemForRoyFlg"] = "Y" if non_tds_rate_mode == "dtaa" else "N"
         form["RateTdsSecbFlg"] = ""
         form["RateTdsSecB"] = ""
         form["DednDateTds"] = ""
@@ -743,6 +746,8 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
         # When DTAA relief is not claimed, DTAA-article fields should be omitted.
         out["RelevantArtDtaa"] = ""
         out["ArtDtaa"] = ""
+
+    out["RemForRoyFlg"] = "Y" if dtaa_claimed else "N"
 
     out["OtherRemDtaa"] = "N" if mode == MODE_TDS else other_rem_dtaa
 
