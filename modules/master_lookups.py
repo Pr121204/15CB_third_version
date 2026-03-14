@@ -380,15 +380,47 @@ def resolve_dtaa(country: str) -> Optional[Dict[str, str]]:
     return load_dtaa_map().get(_normalize(country))
 
 
+def _infer_country_from_dtaa_text(dtaa_text: str) -> str:
+    """Extract the country name from a DTAA description like "DTAA BTWN INDIA AND GERMANY"."""
+    m = re.search(r"DTAA\s+BTWN\s+INDIA\s+AND\s+(.+)$", str(dtaa_text or ""), flags=re.IGNORECASE)
+    if not m:
+        return ""
+    return m.group(1).strip()
+
+
 def split_dtaa_article_text(dtaa_text: str) -> Tuple[str, str]:
     """
     Split DTAA text into:
     - without_article: suitable for RelevantDtaa
     - with_article: suitable for RelevantArtDtaa and ArtDtaa
+
+    If the input text does not already include an "ARTICLE N OF" prefix,
+    try to enrich it using the DTAA master map (to preserve article numbers
+    that are expected in sample/official output).
     """
     with_article = str(dtaa_text or "").strip()
     if not with_article:
         return "", ""
+
+    # If a full article phrase is already present, keep it as-is.
+    if re.match(r"(?i)^ARTICLE\s+\d+", with_article):
+        without_article = re.sub(
+            r"^ARTICLE\s+\d+[A-Z]?\s+OF\s+",
+            "",
+            with_article,
+            flags=re.IGNORECASE,
+        ).strip()
+        return without_article, with_article
+
+    # Enrich missing article prefix if possible.
+    country_hint = _infer_country_from_dtaa_text(with_article)
+    if country_hint:
+        dtaa = resolve_dtaa(country_hint)
+        if dtaa:
+            candidate = str(dtaa.get("dtaa_applicable") or "").strip()
+            if candidate:
+                with_article = candidate
+
     without_article = re.sub(
         r"^ARTICLE\s+\d+[A-Z]?\s+OF\s+",
         "",

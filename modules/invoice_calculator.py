@@ -731,6 +731,26 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
     raw_relevant_article = str(form.get("RelevantArtDtaa") or form.get("ArtDtaa") or "").strip()
     dtaa_source = raw_relevant_article or raw_relevant_dtaa
     dtaa_without_article, dtaa_with_article = split_dtaa_article_text(dtaa_source)
+
+    # Ensure that if only the plain DTAA name is present (no ARTICLE prefix), we
+    # attempt to enrich it with the canonical ARTICLE text from the DTAA master map.
+    # This prevents XML output from dropping the “ARTICLE X OF ...” prefix.
+    if dtaa_with_article and not re.match(r"(?i)^ARTICLE\s+\d+", dtaa_with_article):
+        # Try to infer the country from the DTAA phrase and look it up.
+        m = re.search(r"DTAA\s+BTWN\s+INDIA\s+AND\s+(.+)$", dtaa_with_article, flags=re.IGNORECASE)
+        if m:
+            country_hint = m.group(1).strip()
+            from modules.master_lookups import resolve_dtaa
+
+            dtaa = resolve_dtaa(country_hint)
+            if dtaa:
+                enriched = str(dtaa.get("dtaa_applicable") or "").strip()
+                if enriched:
+                    dtaa_with_article = enriched
+                    # Keep the plain DTAA name if it was explicitly provided.
+                    if not dtaa_without_article:
+                        dtaa_without_article = dtaa_with_article
+
     if not dtaa_without_article:
         dtaa_without_article = raw_relevant_dtaa
     if not dtaa_with_article:

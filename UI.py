@@ -1500,6 +1500,12 @@ def render_form_15cb(
             form["_ui_only_9d_reasons"] = str(form.get("RelArtDetlDDtaa") or "")
 
     _d9d_app = str(form.get("_ui_only_9d_applicable") or "NO").upper()
+    if invoice_id:
+        _applicable_key = f"{invoice_id}_9d_applicable"
+        existing = str(st.session_state.get(_applicable_key) or "").strip().upper()
+        if existing in ("YES", "NO") and existing != _d9d_app:
+            del st.session_state[_applicable_key]
+
     lc, rc = st.columns(ratio)
     with lc:
         _lbl("D. In case of other remittance not covered by sub-items A, B and C")
@@ -1533,6 +1539,14 @@ def render_form_15cb(
 
     # 4.55 other_taxable
     _d9d_taxable = str(form.get("_ui_only_9d_taxable") or "NO").upper()
+
+    # Avoid Streamlit warning: widget key already exists in session state with a different value.
+    if invoice_id:
+        _taxable_key = f"{invoice_id}_9d_taxable"
+        existing = str(st.session_state.get(_taxable_key) or "").strip().upper()
+        if existing in ("YES", "NO") and _d9d_taxable not in ("YES", "NO"):
+            _d9d_taxable = existing
+
     lc, rc = st.columns(ratio)
     with lc:
         _lbl("(b) Whether taxable in India as per DTAA", indent=1)
@@ -1551,10 +1565,18 @@ def render_form_15cb(
     lc, rc = st.columns(ratio)
     with lc:
         _lbl("(c) If yes, rate of TDS required to be deducted in terms of such article of the applicable DTAA", indent=1)
+
+    rate_value = str(form.get("_ui_only_9d_rate") or "")
+    if invoice_id:
+        _rate_key = f"{invoice_id}_9d_rate"
+        existing_rate = str(st.session_state.get(_rate_key) or "")
+        if existing_rate and existing_rate != rate_value:
+            del st.session_state[_rate_key]
+
     with rc:
         form["_ui_only_9d_rate"] = st.text_input(
             "Rate (D)",
-            value=str(form.get("_ui_only_9d_rate") or ""),
+            value=rate_value,
             key=f"{invoice_id}_9d_rate",
             disabled=(not _d9d_on) or (not _d9d_taxable_yes),
             label_visibility="collapsed",

@@ -53,8 +53,8 @@ def process_file(path):
 
 
 if __name__ == "__main__":
-    INPUT_PATH = r"C:/Users/HP/Downloads/fwdrequesting15cbforrbin_citibank/100617248.pdf"
+    INPUT_PATH = r"C:/Users/HP/Downloads/fwdrequesting15cbforrbin_citibank/AG00038371.pdf"
     results = process_file(INPUT_PATH)
-    print(json.dumps(results, indent=2))
+    print(json.dumps(results, indent=2, ensure_ascii=False))
     with open("result.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, ensure_ascii=False)

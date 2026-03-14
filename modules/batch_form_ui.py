@@ -1632,19 +1632,24 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         else:
              ui_9d_applicable = "Select"
 
+    # Keep session state in sync to avoid Streamlit warnings.
+    if invoice_id:
+        _applicable_key = f"{invoice_id}_9d_applicable"
+        existing = str(st.session_state.get(_applicable_key) or "").strip().upper()
+        if existing in ("Select", "YES", "NO") and existing != ui_9d_applicable:
+            del st.session_state[_applicable_key]
+
     ui_9d_taxable = str(form.get("_ui_only_9d_taxable")).strip().upper()
     if ui_9d_taxable not in ("Select", "YES", "NO"):
         ui_9d_taxable = "Select"
 
-    # Ensure we don't trigger Streamlit warnings when a widget's default value differs
-    # from its existing session state. Prefer the session value if present.
+    # Ensure widget default matches session state to avoid Streamlit warnings.
     if invoice_id:
         _taxable_key = f"{invoice_id}_9d_taxable"
-        existing = st.session_state.get(_taxable_key)
-        if existing in ("YES", "NO") and ui_9d_taxable == "Select":
-            ui_9d_taxable = existing
-        elif ui_9d_taxable in ("YES", "NO") and existing != ui_9d_taxable:
-            st.session_state[_taxable_key] = ui_9d_taxable
+        existing = str(st.session_state.get(_taxable_key) or "").strip().upper()
+        if existing in ("YES", "NO") and existing != ui_9d_taxable:
+            # Remove the stale value so the widget can be created with the desired default.
+            del st.session_state[_taxable_key]
 
     lc, rc = st.columns(ratio)
     with lc:
@@ -1708,10 +1713,19 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     lc, rc = st.columns(ratio)
     with lc:
         _label("(c) If yes, rate of TDS required to be deducted in terms of such article of the applicable DTAA", indent=1)
+
+    # Avoid Streamlit warning by ensuring widget default matches session state.
+    rate_value = str(form.get("_ui_only_9d_rate") or "") if (d_applicable and d_taxable) else ""
+    if invoice_id:
+        _rate_key = f"{invoice_id}_9d_rate"
+        existing_rate = str(st.session_state.get(_rate_key) or "")
+        if existing_rate and existing_rate != rate_value:
+            del st.session_state[_rate_key]
+
     with rc:
         form["_ui_only_9d_rate"] = st.text_input(
             "Rate (D)",
-            value=str(form.get("_ui_only_9d_rate") or "") if (d_applicable and d_taxable) else "",
+            value=rate_value,
             key=f"{invoice_id}_9d_rate",
             disabled=(not d_applicable) or (not d_taxable),
             label_visibility="collapsed",
