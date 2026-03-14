@@ -153,6 +153,48 @@ def get_effective_it_rate(rate: float | None = None) -> tuple[float, str]:
     return rate, basis
 
 
+def apply_non_tds_reason_sync(fields: dict) -> dict:
+    """Keep NatureRemDtaa, RelArtDetlDDtaa, and ReasonNot in sync for NON_TDS.
+
+    Single source of truth: lookup_non_tds(NatureRemCategory, RevPurCode).
+
+    Rules:
+    - NatureRemDtaa  — auto-filled from lookup when blank; user edits preserved.
+    - RelArtDetlDDtaa — auto-filled from lookup when blank; user edits preserved.
+    - ReasonNot       — always mirrored from RelArtDetlDDtaa (unconditional).
+
+    The unconditional mirror for ReasonNot ensures the two "if not, reasons"
+    fields (Section 8-ii and Section 9D-d) never carry different text.
+    """
+    from modules.non_tds_lookup import lookup_non_tds
+
+    nature_text = (
+        str(fields.get("NatureRemCategory") or "").strip()
+        or str(fields.get("nature_of_remittance") or "").strip()
+    )
+    purpose_code = str(fields.get("RevPurCode") or "").strip()
+
+    lookup = lookup_non_tds(nature_text, purpose_code)
+    nature_rem_dtaa = (lookup.get("NatureRemDtaa") or "").strip()
+    reason_text = (lookup.get("RelArtDetlDDtaa") or "").strip()
+
+    # Auto-fill NatureRemDtaa only when blank; preserves deliberate user edits.
+    if nature_rem_dtaa and not str(fields.get("NatureRemDtaa") or "").strip():
+        fields["NatureRemDtaa"] = nature_rem_dtaa
+
+    # Auto-fill RelArtDetlDDtaa only when blank; preserves deliberate user edits.
+    if reason_text and not str(fields.get("RelArtDetlDDtaa") or "").strip():
+        fields["RelArtDetlDDtaa"] = reason_text
+
+    # Always mirror RelArtDetlDDtaa → ReasonNot so both fields are always identical.
+    # RelArtDetlDDtaa is the authoritative field; ReasonNot is its Section-8 mirror.
+    current_reason = str(fields.get("RelArtDetlDDtaa") or "").strip()
+    if current_reason:
+        fields["ReasonNot"] = current_reason
+
+    return fields
+
+
 def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
     meta = state.setdefault("meta", {})
     extracted = state.setdefault("extracted", {})
@@ -405,6 +447,21 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
             tax_liable_it,
         )
     elif mode == MODE_NON_TDS:
+        # -----------------------------------------------------------------------
+        # NON_TDS RECOMPUTE — non-withholding documentation flow
+        #
+        # No TDS is deducted. This branch:
+        #   • Forces TDS amounts to zero (AmtPayForgnTds, AmtPayIndianTds).
+        #   • Forces ActlAmtTdsForgn = full FCY remittance (no withholding).
+        #   • Clears RateTdsSecbFlg, RateTdsSecB, DednDateTds (stripped from XML).
+        #   • Clears DTAA article-level fields (TaxIncDtaa, TaxLiablDtaa, RateTdsADtaa).
+        #   • Preserves RemittanceCharIndia (user choice, defaults N).
+        #   • When chargeable=Y, computes IT Act doc fields for documentary record only.
+        #   • When chargeable=N, blanks all IT Act fields (not in final XML).
+        #   • 9D (OtherRemDtaa=Y, NatureRemDtaa, RelArtDetlDDtaa) is the primary path
+        #     for common non-taxable freight/reimbursement cases.
+        #   • 9A/9B/9C flags are preserved from UI, defaulting to N.
+        # -----------------------------------------------------------------------
         # IT Act liability is computed for documentation purposes even though no TDS is withheld.
         # Rate used depends on user toggle: DTAA rate (default) or 20.80% (IT Act).
         non_tds_rate_mode = str(form.get("NonTdsBasisRateMode") or "dtaa")
@@ -436,31 +493,70 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
                 logger.info("non_tds_dtaa_rate_unavailable invoice_id=%s fallback=20.80", invoice_id)
 
         it_liab = invoice_inr * (use_rate_dec / Decimal("100"))
-        form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(invoice_inr)))
-        form["TaxLiablIt"] = _fmt_num(_round_to_int(float(it_liab)))
-        form["BasisDeterTax"] = basis_text
+        # Preserve user's chargeability choice; default to N for NON_TDS (no TDS withheld).
+        existing_chargeable = str(form.get("RemittanceCharIndia") or "").strip().upper()
+        form["RemittanceCharIndia"] = existing_chargeable if existing_chargeable in ("Y", "N") else "N"
+        # Only populate IT Act documentary fields when chargeability is Y.
+        # When user marks N, these fields are suppressed in the final XML anyway, so keep them blank.
+        if form["RemittanceCharIndia"] == "Y":
+            form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(invoice_inr)))
+            form["TaxLiablIt"] = _fmt_num(_round_to_int(float(it_liab)))
+            form["BasisDeterTax"] = basis_text
+        else:
+            form["AmtIncChrgIt"] = ""
+            form["TaxLiablIt"] = ""
+            form["BasisDeterTax"] = ""
         # DTAA exemption applies — no TDS deducted
-        form["RemittanceCharIndia"] = "Y"
         form["AmtPayForgnTds"] = "0"
         form["AmtPayIndianTds"] = "0"
         form["ActlAmtTdsForgn"] = _fmt_num(fcy)
         # Respect UI selection from Section 9D in NON_TDS (default remains "Y").
         form["OtherRemDtaa"] = str(form.get("OtherRemDtaa") or "Y").strip().upper()
-        form["RemForRoyFlg"] = "Y" if non_tds_rate_mode == "dtaa" else "N"
+        # Preserve user's 9A/9B/9C selections; the canonical NON_TDS path uses 9D,
+        # so all three default to N unless the user explicitly chose otherwise.
+        existing_rem_for_roy = str(form.get("RemForRoyFlg") or "").strip().upper()
+        form["RemForRoyFlg"] = existing_rem_for_roy if existing_rem_for_roy in ("Y", "N") else "N"
+        existing_bus_inc = str(form.get("RemAcctBusIncFlg") or "").strip().upper()
+        form["RemAcctBusIncFlg"] = existing_bus_inc if existing_bus_inc in ("Y", "N") else "N"
+        existing_cap_gain = str(form.get("RemOnCapGainFlg") or "").strip().upper()
+        form["RemOnCapGainFlg"] = existing_cap_gain if existing_cap_gain in ("Y", "N") else "N"
         form["RateTdsSecbFlg"] = ""
         form["RateTdsSecB"] = ""
-        # form["DednDateTds"] = ""  # Removed to allow "Deduction Date" mapping in non-tds mode
+        form["DednDateTds"] = ""  # No deduction date for NON_TDS; tag is stripped from final XML
         # DTAA tax fields must be absent in non-TDS XML
         form["TaxIncDtaa"] = ""
         form["TaxLiablDtaa"] = ""
         form["RateTdsADtaa"] = ""
-        # Ensure DTAA comment fields are never blank — regenerate from nature if cleared.
-        if not str(form.get("NatureRemDtaa") or "").strip():
-            form["NatureRemDtaa"] = "FEES FOR TECHNICAL SERVICES"
-        if not str(form.get("RelArtDetlDDtaa") or "").strip():
-            from modules.non_tds_lookup import _comment_for_nature
-            form["RelArtDetlDDtaa"] = _comment_for_nature(form["NatureRemDtaa"])
-            logger.info("recompute_non_tds_comment_regenerated invoice_id=%s nature=%r", invoice_id, form["NatureRemDtaa"])
+        # Fix 4: Auto-default _ui_only_9d_taxable to "NO" on the canonical NON_TDS path
+        # (RemittanceCharIndia=N, OtherRemDtaa=Y) when the user has not yet made a choice.
+        if (
+            form["RemittanceCharIndia"] == "N"
+            and form["OtherRemDtaa"] == "Y"
+            and str(form.get("_ui_only_9d_taxable") or "").strip().upper() in ("", "SELECT")
+        ):
+            form["_ui_only_9d_taxable"] = "NO"
+
+        _9d_taxable_ui = str(form.get("_ui_only_9d_taxable") or "").strip().upper()
+
+        # Fix 5: On the canonical non-taxable 9D path, clear section 9 article/DTAA fields
+        # that are irrelevant and would otherwise produce stale XML values.
+        _canonical_non_tds_path = (
+            form["RemittanceCharIndia"] == "N"
+            and form["OtherRemDtaa"] == "Y"
+            and _9d_taxable_ui == "NO"
+        )
+        if _canonical_non_tds_path:
+            for _stale in ("RelevantArtDtaa", "TaxIncDtaa", "TaxLiablDtaa", "RateTdsADtaa", "BasisDeterTax", "RateTdsSecB"):
+                form[_stale] = ""
+
+        # Cleanup: when 9D taxable = Yes, reasons are not legally required.
+        # Remove stale values so they do not appear in XML or confuse the UI.
+        # The authoritative sync (NatureRemDtaa / RelArtDetlDDtaa / ReasonNot) happens
+        # once in invoice_state_to_xml_fields via apply_non_tds_reason_sync — not here.
+        _9d_needs_reasons = form["OtherRemDtaa"] == "Y" and _9d_taxable_ui != "YES"
+        if not _9d_needs_reasons:
+            form.pop("RelArtDetlDDtaa", None)
+            form.pop("ReasonNot", None)
         logger.info(
             "recompute_non_tds_done invoice_id=%s AmtIncChrgIt=%s TaxLiablIt=%s",
             invoice_id, form["AmtIncChrgIt"], form["TaxLiablIt"],
@@ -476,10 +572,16 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
             str(form.get("RemitterPAN") or ""),
         )
 
-    # Restore Section 8 manual overrides (if any) to preserve UI edits
+    # Restore Section 8 manual overrides (if any) to preserve UI edits.
+    # Skip IT Act numeric/text fields when RemittanceCharIndia=N — blanking them is intentional
+    # and restoring a stale override would contradict what goes into the final XML.
+    _chargeable = str(form.get("RemittanceCharIndia") or "Y").strip().upper() == "Y"
+    _it_act_fields = {"AmtIncChrgIt", "TaxLiablIt", "BasisDeterTax"}
     for field in ["AmtIncChrgIt", "TaxLiablIt", "BasisDeterTax", "SecRemCovered"]:
         override_key = f"_ui_override_sec8_{field}"
         if override_key in form:
+            if field in _it_act_fields and not _chargeable:
+                continue  # Do not restore — user marked not chargeable
             form[field] = str(form[override_key])
             if field == "SecRemCovered":
                 form["SecRemitCovered"] = form[field]
@@ -768,23 +870,15 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
     other_rem_dtaa_val = other_rem_dtaa if mode != MODE_TDS else ("N" if dtaa_claimed else "Y")
     out["OtherRemDtaa"] = other_rem_dtaa_val
 
-    # If OtherRemDtaa is "Y", ensure NatureRemDtaa is not blank.
-    if other_rem_dtaa_val == "Y" and not out.get("NatureRemDtaa"):
-        # 1. Try to resolve label from NatureRemCategory code
-        cat_code = str(out.get("NatureRemCategory") or "").strip()
-        label = ""
-        if cat_code:
-            options = load_nature_options()
-            for opt in options:
-                if str(opt.get("code")).strip() == cat_code:
-                    label = str(opt.get("label") or "").strip()
-                    break
-        
-        # 2. Fallback to AI-extracted nature or default
-        if not label:
-            label = str(form.get("nature_of_remittance") or "FEES FOR TECHNICAL SERVICES").strip()
-        
-        out["NatureRemDtaa"] = label
+    # Final-field-map sync for NON_TDS 9D non-taxable path.
+    # apply_non_tds_reason_sync is the single source of truth for NatureRemDtaa,
+    # RelArtDetlDDtaa, and ReasonNot.  Calling it here covers the case where the
+    # recompute branch did not run (e.g. direct XML generation without UI recompute).
+    # Guard mirrors the recompute condition: OtherRemDtaa=Y and 9D taxable ≠ YES.
+    if mode == MODE_NON_TDS and other_rem_dtaa_val == "Y":
+        _9d_taxable_out = str(form.get("_ui_only_9d_taxable") or "").strip().upper()
+        if _9d_taxable_out != "YES":
+            out = apply_non_tds_reason_sync(out)
 
     # For non-chargeable remittance, keep reason text and suppress IT Act tax block fields.
     if str(out.get("RemittanceCharIndia") or "Y").strip().upper() != "Y":

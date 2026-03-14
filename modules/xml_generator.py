@@ -52,8 +52,33 @@ def validate_required_fields(fields: Dict[str, str], mode: str = MODE_TDS) -> No
     required = ["SWVersionNo", "FormName", "AssessmentYear", "RemitterPAN", "NameRemitter", "CurrencySecbCode"]
     missing = [k for k in required if not str(fields.get(k, "")).strip()]
     if str(mode or MODE_TDS) == MODE_NON_TDS:
-        non_tds_required = ["RelArtDetlDDtaa", "NatureRemDtaa"]
-        missing.extend([k for k in non_tds_required if not str(fields.get(k, "")).strip()])
+        # NON_TDS is a non-withholding documentation flow.
+        # TDS fields are forced to zero/blank; 9D justification is the main path for
+        # common non-taxable cases (OtherRemDtaa=Y, NatureRemDtaa, RelArtDetlDDtaa).
+
+        # OtherRemDtaa must always be present (Y = 9D path, N = article-based DTAA path).
+        if not str(fields.get("OtherRemDtaa", "")).strip():
+            missing.append("OtherRemDtaa")
+
+        _other_rem = str(fields.get("OtherRemDtaa", "")).strip().upper()
+
+        # When 9D path is active, NatureRemDtaa is the primary classification field.
+        if _other_rem == "Y" and not str(fields.get("NatureRemDtaa", "")).strip():
+            missing.append("NatureRemDtaa")
+
+        # RelArtDetlDDtaa (9D legal reasons) is required on the non-taxable 9D path.
+        # When 9D taxable = Yes, reasons are not legally required — the rate field carries
+        # the justification instead. The private key _9d_taxable_state is injected by
+        # build_xml_fields_by_mode from the UI form so we can distinguish the two cases.
+        if _other_rem == "Y":
+            _9d_taxable = str(fields.get("_9d_taxable_state", "")).strip().upper()
+            if _9d_taxable != "YES" and not str(fields.get("RelArtDetlDDtaa", "")).strip():
+                missing.append("RelArtDetlDDtaa")
+
+        # ReasonNot is mandatory when income is not chargeable to tax in India.
+        if str(fields.get("RemittanceCharIndia", "")).strip().upper() == "N":
+            if not str(fields.get("ReasonNot", "")).strip():
+                missing.append("ReasonNot")
     if str(mode or MODE_TDS) == MODE_TDS:
         # Core fields required for any TDS reporting
         tds_required = [
@@ -155,7 +180,7 @@ def generate_xml_content(xml_fields: Dict[str, str], mode: str = MODE_TDS, templ
     xml_text = _fill_template(xml_fields, template_path)
     xml_text = _remove_empty_optional_tags(xml_text)
     if mode == MODE_NON_TDS:
-        for tag in ("RateTdsSecbFlg", "RateTdsSecB"):
+        for tag in ("RateTdsSecbFlg", "RateTdsSecB", "DednDateTds"):
             xml_text = _remove_tag_block(xml_text, tag)
     return xml_text
 
@@ -171,7 +196,12 @@ def build_xml_fields_by_mode(state: Dict[str, object]) -> Dict[str, str]:
         out["AmtPayIndianTds"] = "0"
         out["RateTdsSecbFlg"] = ""
         out["RateTdsSecB"] = ""
-        # out["DednDateTds"] = ""  # Mapping Deduction Date in non-tds mode
+        out["DednDateTds"] = ""  # No deduction date in NON_TDS; tag is stripped by generate_xml_content
+        # Inject the 9D taxable UI state as a private meta key so validate_required_fields
+        # can distinguish the non-taxable path (requires RelArtDetlDDtaa) from the taxable
+        # path (does not). This key has no matching template placeholder and is harmless.
+        _form = state.get("form", {}) if isinstance(state.get("form"), dict) else {}
+        out["_9d_taxable_state"] = str(_form.get("_ui_only_9d_taxable") or "").strip().upper()
     return out
 
 

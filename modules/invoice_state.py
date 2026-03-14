@@ -992,6 +992,10 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
         _ref = lookup_non_tds(_nature_query, _purpose_query)
         form.setdefault("NatureRemDtaa", _ref["NatureRemDtaa"])
         form.setdefault("RelArtDetlDDtaa", _ref["RelArtDetlDDtaa"])
+        # ReasonNot (Section 8: "if not, reasons thereof") and RelArtDetlDDtaa (Section 9D:
+        # "if not, brief reasons thereof") share the same non-TDS explanation text.
+        # Seed both from the same lookup so they start in sync.
+        form.setdefault("ReasonNot", _ref["RelArtDetlDDtaa"])
         logger.info(
             "non_tds_lookup invoice_id=%s query=%r purpose=%r NatureRemDtaa=%r RelArtDetlDDtaa=%r",
             invoice_id, _nature_query, _purpose_query,

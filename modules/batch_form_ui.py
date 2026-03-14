@@ -1192,13 +1192,24 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
 
     is_chargeable = str(form.get("RemittanceCharIndia") or "Y").upper() == "Y"
 
+    # Housekeeping: when chargeability flips, clear the stale opposite-side data from form
+    # so disabled fields do not retain previous values.
+    if is_chargeable:
+        # User says income IS chargeable — reason-not is no longer applicable
+        form.pop("ReasonNot", None)
+    else:
+        # User says income is NOT chargeable — clear IT Act override keys so disabled fields
+        # do not show computed/stale values that won't appear in the final XML
+        for _f in ("AmtIncChrgIt", "TaxLiablIt", "BasisDeterTax", "SecRemCovered"):
+            form.pop(f"_ui_override_sec8_{_f}", None)
+
     lc, rc = st.columns(ratio)
     with lc:
         _label("(ii) If not, reasons thereof", indent=1)
     with rc:
         form["ReasonNot"] = st.text_input(
             "Reason not chargeable",
-            value=str(form.get("ReasonNot") or ""),
+            value="" if is_chargeable else str(form.get("ReasonNot") or ""),
             key=f"{invoice_id}_8_reason_not",
             disabled=is_chargeable,
             label_visibility="collapsed",
@@ -1210,9 +1221,13 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with lc:
         _label("(a) The relevant section of the Act under which the remittance is covered", indent=2)
     with rc:
-        fallback_sec = str(preview_form.get("SecRemCovered") or form.get("SecRemCovered") or SEC_REM_COVERED_DEFAULT)
+        # When not chargeable, section of Act must be blank (not the default placeholder).
+        if is_chargeable:
+            fallback_sec = str(preview_form.get("SecRemCovered") or form.get("SecRemCovered") or SEC_REM_COVERED_DEFAULT)
+        else:
+            fallback_sec = ""
         if "_ui_override_sec8_SecRemCovered" in form:
-            val_sec = str(form["_ui_override_sec8_SecRemCovered"])
+            val_sec = str(form["_ui_override_sec8_SecRemCovered"]) if is_chargeable else ""
         else:
             val_sec = fallback_sec
         new_sec = st.text_input(
@@ -1231,11 +1246,9 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with lc:
         _label("(b) The amount of income chargeable to tax", indent=2)
     with rc:
-        fallback_inc = str(preview_form.get("AmtIncChrgIt") or form.get("AmtIncChrgIt") or "")
-        if "_ui_override_sec8_AmtIncChrgIt" in form:
-            val_inc = str(form["_ui_override_sec8_AmtIncChrgIt"])
-        else:
-            val_inc = fallback_inc
+        # When not chargeable, force blank (override keys were already popped above).
+        fallback_inc = "" if not is_chargeable else str(preview_form.get("AmtIncChrgIt") or form.get("AmtIncChrgIt") or "")
+        val_inc = str(form["_ui_override_sec8_AmtIncChrgIt"]) if ("_ui_override_sec8_AmtIncChrgIt" in form and is_chargeable) else fallback_inc
         new_inc = st.text_input(
             "Amount chargeable to tax",
             value=val_inc,
@@ -1245,17 +1258,14 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         ).strip()
         if is_chargeable and new_inc != fallback_inc:
             form["_ui_override_sec8_AmtIncChrgIt"] = new_inc
-        form["AmtIncChrgIt"] = new_inc
+        form["AmtIncChrgIt"] = new_inc if is_chargeable else ""
 
     lc, rc = st.columns(ratio)
     with lc:
         _label("(c) The tax liability", indent=2)
     with rc:
-        fallback_tax = str(preview_form.get("TaxLiablIt") or form.get("TaxLiablIt") or "")
-        if "_ui_override_sec8_TaxLiablIt" in form:
-            val_tax = str(form["_ui_override_sec8_TaxLiablIt"])
-        else:
-            val_tax = fallback_tax
+        fallback_tax = "" if not is_chargeable else str(preview_form.get("TaxLiablIt") or form.get("TaxLiablIt") or "")
+        val_tax = str(form["_ui_override_sec8_TaxLiablIt"]) if ("_ui_override_sec8_TaxLiablIt" in form and is_chargeable) else fallback_tax
         new_tax = st.text_input(
             "Tax liability",
             value=val_tax,
@@ -1265,17 +1275,14 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         ).strip()
         if is_chargeable and new_tax != fallback_tax:
             form["_ui_override_sec8_TaxLiablIt"] = new_tax
-        form["TaxLiablIt"] = new_tax
+        form["TaxLiablIt"] = new_tax if is_chargeable else ""
 
     lc, rc = st.columns(ratio)
     with lc:
         _label("(d) Basis of determining taxable income and tax liability", indent=2)
     with rc:
-        fallback_basis = str(preview_form.get("BasisDeterTax") or form.get("BasisDeterTax") or "")
-        if "_ui_override_sec8_BasisDeterTax" in form:
-            val_basis = str(form["_ui_override_sec8_BasisDeterTax"])
-        else:
-            val_basis = fallback_basis
+        fallback_basis = "" if not is_chargeable else str(preview_form.get("BasisDeterTax") or form.get("BasisDeterTax") or "")
+        val_basis = str(form["_ui_override_sec8_BasisDeterTax"]) if ("_ui_override_sec8_BasisDeterTax" in form and is_chargeable) else fallback_basis
         new_basis = st.text_area(
             "Basis",
             value=val_basis,
@@ -1286,7 +1293,7 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         ).strip()
         if is_chargeable and new_basis != fallback_basis:
             form["_ui_override_sec8_BasisDeterTax"] = new_basis
-        form["BasisDeterTax"] = new_basis
+        form["BasisDeterTax"] = new_basis if is_chargeable else ""
 
     st.divider()
 
@@ -1440,42 +1447,50 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         _label("(a) Article of DTAA", indent=1)
     with rc:
         fallback_arta = str(preview_form.get("ArtDtaa") or form.get("ArtDtaa") or "")
-        if "_ui_override_sec9_ArtDtaa" in form:
+        if not section_a_enabled:
+            form.pop("_ui_override_sec9_ArtDtaa", None)
+            val_arta = ""
+        elif "_ui_override_sec9_ArtDtaa" in form:
             val_arta = str(form["_ui_override_sec9_ArtDtaa"])
         else:
             val_arta = fallback_arta
-        if not section_a_enabled:
-            val_arta = ""
-        if f"{invoice_id}_9a_article" not in st.session_state:
-            st.session_state[f"{invoice_id}_9a_article"] = val_arta
+        key_9a_art = f"{invoice_id}_9a_article"
+        if key_9a_art not in st.session_state or not section_a_enabled:
+            st.session_state[key_9a_art] = val_arta
         new_arta = st.text_input(
             "Article of DTAA (A)",
-            key=f"{invoice_id}_9a_article",
+            key=key_9a_art,
+            disabled=not section_a_enabled,
             label_visibility="collapsed",
         ).strip()
-        if new_arta != fallback_arta:
+        if section_a_enabled and new_arta != fallback_arta:
             form["_ui_override_sec9_ArtDtaa"] = new_arta
-        form["ArtDtaa"] = new_arta
+        form["ArtDtaa"] = new_arta if section_a_enabled else ""
 
     lc, rc = st.columns(ratio)
     with lc:
         _label("(b) Rate of TDS required to be deducted in terms of such article of the applicable DTAA", indent=1)
     with rc:
         fallback_ratea = str(preview_form.get("RateTdsADtaa") or form.get("RateTdsADtaa") or "")
-        if "_ui_override_sec9_RateTdsADtaa" in form:
+        if not section_a_enabled:
+            form.pop("_ui_override_sec9_RateTdsADtaa", None)
+            val_ratea = ""
+        elif "_ui_override_sec9_RateTdsADtaa" in form:
             val_ratea = str(form["_ui_override_sec9_RateTdsADtaa"])
         else:
             val_ratea = fallback_ratea
-        if f"{invoice_id}_9a_rate" not in st.session_state:
-            st.session_state[f"{invoice_id}_9a_rate"] = val_ratea
+        key_9a_rate = f"{invoice_id}_9a_rate"
+        if key_9a_rate not in st.session_state or not section_a_enabled:
+            st.session_state[key_9a_rate] = val_ratea
         new_ratea = st.text_input(
             "Rate of TDS (DTAA A)",
-            key=f"{invoice_id}_9a_rate",
+            key=key_9a_rate,
+            disabled=not section_a_enabled,
             label_visibility="collapsed",
         ).strip()
-        if new_ratea != fallback_ratea:
+        if section_a_enabled and new_ratea != fallback_ratea:
             form["_ui_override_sec9_RateTdsADtaa"] = new_ratea
-        form["RateTdsADtaa"] = new_ratea
+        form["RateTdsADtaa"] = new_ratea if section_a_enabled else ""
 
     # 9B UI-only
     form.setdefault("_ui_only_9b_applicable", "Select")
@@ -1621,6 +1636,16 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     if ui_9d_taxable not in ("Select", "YES", "NO"):
         ui_9d_taxable = "Select"
 
+    # Ensure we don't trigger Streamlit warnings when a widget's default value differs
+    # from its existing session state. Prefer the session value if present.
+    if invoice_id:
+        _taxable_key = f"{invoice_id}_9d_taxable"
+        existing = st.session_state.get(_taxable_key)
+        if existing in ("YES", "NO") and ui_9d_taxable == "Select":
+            ui_9d_taxable = existing
+        elif ui_9d_taxable in ("YES", "NO") and existing != ui_9d_taxable:
+            st.session_state[_taxable_key] = ui_9d_taxable
+
     lc, rc = st.columns(ratio)
     with lc:
         _label("D. In case of other remittance not covered by sub-items A, B and C")
@@ -1723,6 +1748,12 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     preview_form_after_9 = _safe_preview_form(state)
     _label("10. Amount of TDS")
 
+    # In NON_TDS mode the backend enforces 0 for TDS amounts; discard any stale manual
+    # overrides so that switching back to TDS mode starts from a clean state.
+    if not is_tds_mode:
+        form.pop("_ui_override_sec10_AmtPayForgnTds", None)
+        form.pop("_ui_override_sec10_AmtPayIndianTds", None)
+
     lc, rc = st.columns(ratio)
     with lc:
         _label("In foreign currency", indent=1)
@@ -1739,9 +1770,10 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         new_amt_fc = st.text_input(
             "TDS in foreign currency",
             key=key_amt_fc,
+            disabled=not is_tds_mode,
             label_visibility="collapsed",
         ).strip()
-        if new_amt_fc != fallback_amt_fc:
+        if is_tds_mode and new_amt_fc != fallback_amt_fc:
             form["_ui_override_sec10_AmtPayForgnTds"] = new_amt_fc
         form["AmtPayForgnTds"] = new_amt_fc
 
@@ -1758,9 +1790,10 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         new_amt_inr = st.text_input(
             "TDS in INR",
             key=key_amt_inr,
+            disabled=not is_tds_mode,
             label_visibility="collapsed",
         ).strip()
-        if new_amt_inr != fallback_amt_inr:
+        if is_tds_mode and new_amt_inr != fallback_amt_inr:
             form["_ui_override_sec10_AmtPayIndianTds"] = new_amt_inr
         form["AmtPayIndianTds"] = new_amt_inr
 
@@ -1804,6 +1837,9 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
                 label_visibility="collapsed",
             )
 
+        # In NON_TDS mode discard stale rate override so it does not survive a mode switch.
+        if not is_tds_mode:
+            form.pop("_ui_override_sec11_RateTdsSecB", None)
         fallback_rate = str(preview_form_after_9.get("RateTdsSecB") or form.get("RateTdsSecB") or "")
         key_rate = f"{invoice_id}_11_rate"
         if "_ui_override_sec11_RateTdsSecB" not in form:
@@ -1813,9 +1849,10 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         new_rate = st.text_input(
             "Rate of TDS value",
             key=key_rate,
+            disabled=not is_tds_mode,
             label_visibility="collapsed",
         ).strip()
-        if new_rate != fallback_rate:
+        if is_tds_mode and new_rate != fallback_rate:
             form["_ui_override_sec11_RateTdsSecB"] = new_rate
         form["RateTdsSecB"] = new_rate
 
@@ -1823,6 +1860,10 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with lc:
         _label("12. Actual amount of remittance after TDS (In foreign currency)")
     with rc:
+        # In NON_TDS the actual remittance always equals the full FCY amount (no withholding).
+        # Clear stale overrides so the backend-computed value is always shown.
+        if not is_tds_mode:
+            form.pop("_ui_override_sec12_ActlAmtTdsForgn", None)
         fallback_actl = str(preview_form_after_9.get("ActlAmtTdsForgn") or form.get("ActlAmtTdsForgn") or "")
         key_actl = f"{invoice_id}_12_actl_remit"
         if "_ui_override_sec12_ActlAmtTdsForgn" not in form:
@@ -1832,9 +1873,10 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         new_actl = st.text_input(
             "Actual remittance after TDS",
             key=key_actl,
+            disabled=not is_tds_mode,
             label_visibility="collapsed",
         ).strip()
-        if new_actl != fallback_actl:
+        if is_tds_mode and new_actl != fallback_actl:
             form["_ui_override_sec12_ActlAmtTdsForgn"] = new_actl
         form["ActlAmtTdsForgn"] = new_actl
 
@@ -1842,28 +1884,37 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with lc:
         _label("13. Date of deduction of tax at source, if any")
     with rc:
-        _parsed = _parse_iso_date(str(form.get("DednDateTds") or ""))
-        if _parsed is None and str(form.get("DednDateTds") or "").strip():
-            st.warning("Existing deduction date is invalid. Expected DD/MM/YYYY.")
-        
-        # Use default logic (which checks config/meta) even in non-TDS mode
-        base_date_val = str(form.get("DednDateTds") or _default_dedn_date(form, meta).strftime("%d/%m/%Y"))
+        # In NON_TDS the deduction date is stripped from the final XML entirely.
+        # Clear any stale override and show a blank/disabled field to avoid false values.
+        if not is_tds_mode:
+            form.pop("_ui_override_sec13_DednDateTds", None)
+            form["DednDateTds"] = ""
 
-        fallback_date = str(preview_form_after_9.get("DednDateTds") or base_date_val)
+        _parsed = _parse_iso_date(str(form.get("DednDateTds") or ""))
+        if is_tds_mode and _parsed is None and str(form.get("DednDateTds") or "").strip():
+            st.warning("Existing deduction date is invalid. Expected DD/MM/YYYY.")
+
+        if is_tds_mode:
+            base_date_val = str(form.get("DednDateTds") or _default_dedn_date(form, meta).strftime("%d/%m/%Y"))
+        else:
+            base_date_val = ""
+
+        fallback_date = str(preview_form_after_9.get("DednDateTds") or base_date_val) if is_tds_mode else ""
         key_dedn_date = f"{invoice_id}_13_dedn_date"
         if "_ui_override_sec13_DednDateTds" not in form:
             if key_dedn_date not in st.session_state or form.get("DednDateTds") != fallback_date:
                 st.session_state[key_dedn_date] = fallback_date
         val_date = str(form.get("_ui_override_sec13_DednDateTds", fallback_date))
-        
+
         new_date = st.text_input(
             "Date of deduction",
             key=key_dedn_date,
+            disabled=not is_tds_mode,
             label_visibility="collapsed",
-            placeholder="DD/MM/YYYY",
+            placeholder="DD/MM/YYYY" if is_tds_mode else "",
         ).strip()
-        
-        if new_date != fallback_date:
+
+        if is_tds_mode and new_date != fallback_date:
             form["_ui_override_sec13_DednDateTds"] = new_date
         form["DednDateTds"] = new_date
 
