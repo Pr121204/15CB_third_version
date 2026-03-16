@@ -811,9 +811,15 @@ def _process_single_invoice(inv_id: str, *, wait: bool = False) -> None:
     inv = invoices[inv_id]
     inv["status"] = "processing"
 
-    # Build full config merging global controls with per-invoice Excel data
+    # Build full config merging global controls with per-invoice Excel data.
+    # Per-invoice overrides (mode, gross_up, it_act_rate, non_tds_rate_mode)
+    # take precedence over the global defaults.
     ex = inv.get("excel") or {}
     config = dict(state["global_controls"])
+    config["mode"] = _effective_mode(inv)
+    config["gross_up"] = _effective_gross(inv)
+    config["it_act_rate"] = _effective_it_rate(inv)
+    config["non_tds_rate_mode"] = _effective_non_tds_rate_mode(inv)
     config["currency_short"] = str(ex.get("currency") or "").strip()
     try:
         config["exchange_rate"] = float(ex.get("exchange_rate") or 0)
