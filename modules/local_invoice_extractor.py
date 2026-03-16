@@ -43,7 +43,7 @@ try:
     from pdf_reader import extract_pdf_data_with_ocr_fallback  # type: ignore
     from text_utils import remove_hex_strings  # type: ignore
     from extractor import detect_template  # type: ignore
-    from extractors import bosch_vietnam, bosch_germany, bosch_sap, bosch_sap_de, sap_se  # type: ignore
+    from extractors import bosch_vietnam, bosch_germany, bosch_sap, bosch_sap_de, sap_se, syntegon  # type: ignore
 
     _extractor_imported = True
 except Exception as _import_err:
@@ -446,6 +446,8 @@ def try_local_extraction_from_bytes(
             raw_fields = bosch_sap.extract(text, words)
         elif template_type == "sap_se":
             raw_fields = sap_se.extract(text, words)
+        elif template_type == "syntegon":
+            raw_fields = syntegon.extract(text, words)
         else:
             return None, "generic", text
 

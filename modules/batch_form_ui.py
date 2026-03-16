@@ -53,9 +53,9 @@ def compose_name_remitter(remitter_name: str, remitter_address: str) -> str:
 
     if remitter_name and remitter_address:
         if remitter_address.upper().startswith(remitter_name.upper()):
-            return remitter_address
-        return f"{remitter_name}. {remitter_address}"
-    return remitter_name or remitter_address
+            return remitter_address.upper()
+        return f"{remitter_name}. {remitter_address}".upper()
+    return (remitter_name or remitter_address).upper()
 
 
 def compose_name_remittee(beneficiary_name: str, invoice_number: str, invoice_date_iso: str) -> str:
@@ -650,9 +650,11 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
             label_visibility="collapsed",
         )
     with h1c4:
-        # Show final composed remitter (XML-ready) in the top header field.
+        # Show the remitter name (not composed name+address) in the header field so
+        # that both PAN lookup and the XML NameRemitter field receive the pure entity
+        # name.  The address is displayed separately in the remitter address widget.
         if f"{invoice_id}_header_remitter_name" not in st.session_state:
-            st.session_state[f"{invoice_id}_header_remitter_name"] = display_remitter
+            st.session_state[f"{invoice_id}_header_remitter_name"] = raw_remitter
         new_remitter = st.text_input(
             "Name of the Remitter",
             key=f"{invoice_id}_header_remitter_name",

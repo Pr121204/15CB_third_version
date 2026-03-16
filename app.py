@@ -1070,6 +1070,13 @@ def render_bulk_invoice_page() -> None:
 
         action_col1, action_col2, action_col3, action_col4 = st.columns([2, 2, 2, 2])
         with action_col1:
+            if st.button("Process All Invoices", type="primary"):
+                for inv_id in invoices.keys():
+                    _process_single_invoice(inv_id)
+                st.success(f"Started processing {len(invoices)} invoices.")
+                st.rerun()
+
+        with action_col2:
             if st.button("Process Pending Only", type="primary"):
                 pending_ids = [inv_id for inv_id, inv in invoices.items() if _is_pending(inv)]
                 if not pending_ids:
@@ -1080,16 +1087,10 @@ def render_bulk_invoice_page() -> None:
                     st.success(f"Started processing {len(pending_ids)} pending invoices.")
                     st.rerun()
 
-        with action_col2:
-            if st.button("Process All Invoices"):
-                for inv_id in invoices.keys():
-                    _process_single_invoice(inv_id)
-                st.success(f"Started processing {len(invoices)} invoices.")
-                st.rerun()
-
         with action_col3:
             if st.button(
                 "Generate XML (Missing Only)",
+                type="primary",
                 disabled=not any(_is_processed(inv) and _is_xml_missing(inv) for inv in invoices.values()),
             ):
                 ok_n = 0
@@ -1134,6 +1135,7 @@ def render_bulk_invoice_page() -> None:
                 mime="application/zip",
                 disabled=(len(ready_files) == 0),
                 key="download_all_zip",
+                type="primary",
             )
             if ready_files:
                 st.caption(f"{len(ready_files)} included. {len(skipped)} skipped.")
@@ -1202,7 +1204,9 @@ def render_bulk_invoice_page() -> None:
         if not tab_ids:
             st.info("No invoices match the selected filter.")
 
-        tabs = st.tabs([invoices[i]["file_name"] for i in tab_ids]) if tab_ids else []
+        def _bold_num(n):
+            return str(n).translate(str.maketrans("0123456789", "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗"))
+        tabs = st.tabs([f"{_bold_num(idx+1)}. {invoices[i]['file_name']}" for idx, i in enumerate(tab_ids)]) if tab_ids else []
         for tab, inv_id in zip(tabs, tab_ids):
             inv = invoices[inv_id]
             with tab:
@@ -1240,6 +1244,20 @@ def render_bulk_invoice_page() -> None:
                 dedn_missing_flag = bool((state_meta if isinstance(state_meta, dict) else {}).get("dedn_date_missing"))
                 if dedn_missing_flag or not _is_valid_iso_date(str(ex.get("dedn_date_tds") or "")):
                     st.warning("Deduction Date (Posting Date) missing in Excel; XML generation is blocked for this invoice.")
+
+                # ── Invoice Preview ──
+                with st.expander("📄 Preview Invoice", expanded=False):
+                    _pdf_bytes = inv.get("file_bytes")
+                    if _pdf_bytes:
+                        import base64
+                        _b64 = base64.b64encode(_pdf_bytes).decode("utf-8")
+                        st.markdown(
+                            f'<iframe src="data:application/pdf;base64,{_b64}" '
+                            f'width="100%" height="700px" style="border:1px solid #e0e0e0; border-radius:8px;"></iframe>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.info("PDF data not available for preview.")
 
                 # ── Per-invoice Control Card ──
                 st.markdown("#### ✅ Invoice controls")
@@ -1377,7 +1395,7 @@ def render_bulk_invoice_page() -> None:
                 # Buttons for processing and XML generation
                 bc1, bc2, bc3 = st.columns([2, 2, 2])
                 with bc1:
-                    if st.button("Process this invoice", key=f"process_{inv_id}"):
+                    if st.button("Process this invoice", key=f"process_{inv_id}", type="primary"):
                         with st.spinner("Processing..."):
                             _process_single_invoice(inv_id, wait=True)
                         if invoices[inv_id]["status"] == "processed":
@@ -1389,6 +1407,7 @@ def render_bulk_invoice_page() -> None:
                     if st.button(
                         "Generate XML",
                         key=f"generate_xml_{inv_id}",
+                        type="primary",
                         disabled=(inv.get("status") != "processed"),
                     ):
                         _generate_xml_for_invoice(inv_id)

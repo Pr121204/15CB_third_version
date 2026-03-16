@@ -68,7 +68,7 @@ def _normalize_name(raw):
     name = re.sub(r",?\s+\bZum\s+Eisengie[sßf]er.*$", "", name, flags=re.IGNORECASE)
     # Strip trailing standalone brand-logo token (e.g. 'Robert Bosch GmbH BOSCH')
     name = re.sub(
-        r"\s+(?!GmbH|KFT|NV|BV|SE|AG|AB|AS|LLC|INC|LTD)[A-Z]{2,8}\s*$",
+        r"\s+(?!GmbH|SRL|KFT|NV|BV|SE|AG|AB|AS|LLC|INC|LTD)[A-Z]{2,8}\s*$",
         "", name
     ).strip()
     return (name if name else raw).upper()
@@ -142,7 +142,8 @@ def _clean_address_text(addr):
     # 2. Strip name-wrap fragments (e.g. "Ltd., GAT N. 306..." -> "GAT N. 306...")
     # Longest match first.
     addr = re.sub(
-        r"^(?:India\s+Private\s+Ltd\.?|Private\s+Limited|Private\s+Ltd\.?|Limited|Private|Pvt\.?|Ltd\.?),?\s*",
+        r"^(?:Mobility\s+Platform\s+and\s+Solutions\s+India\s+Private\s+Limited"
+        r"|India\s+Private\s+Ltd\.?|Private\s+Limited|Private\s+Ltd\.?|Limited|Private|Pvt\.?|Ltd\.?),?\s*",
         "", addr, flags=re.IGNORECASE
     ).strip()
     return addr
@@ -264,7 +265,7 @@ def extract(text, words=None):
             break
         _name_lines.append(_l)
         if re.search(
-            r"\b(GmbH|KFT|Kft\.|Ltd\.|Limited|S\.A\.S\.|spol\.|"
+            r"\b(GmbH|SRL|KFT|Kft\.|Ltd\.|Limited|S\.A\.S\.|spol\.|"
             r"Corp\.|Inc\.|LLC|AG|NV|BV|SE|Company)\b",
             _l, re.IGNORECASE
         ):
@@ -277,7 +278,7 @@ def extract(text, words=None):
     # Priority: (1) labeled VAT ID → (2) standalone VAT line → (3) Company address
     # line (focused, avoids false positives) → (4) broad first-25-line search
 
-    m_vat = re.search(r"Our\s+VAT\s+ID\s+No\s*:?\s*([A-Z]{2,3})\d+", text, re.IGNORECASE)
+    m_vat = re.search(r"Our\s+VAT\s+ID\s+No\s*[:;\s]+\s*([A-Z]{2,3})\d+", text, re.IGNORECASE)
     if not m_vat:
         # Standalone VAT number on its own line e.g. "DE294064848", "ATU14719303"
         # Handles 2 or 3 letter prefixes (ATU)
@@ -321,6 +322,17 @@ def extract(text, words=None):
 
     if m_ca:
         addr = m_ca.group(1).strip().rstrip(",").strip()
+        # Collect subsequent lines if they look like address parts
+        idx = _ca_text.find(m_ca.group(0))
+        rest = _ca_text[idx + len(m_ca.group(0)):].lstrip()
+        for cand_line in rest.splitlines()[:3]:
+            cand_l = cand_line.strip()
+            if not cand_l: continue
+            if re.search(r"\b(ISHO|Timisoara|Judet|postal|Timis|Office|Building|Floor|Bulevardul)\b", cand_l, re.I):
+                addr += " " + cand_l
+            else:
+                break
+        
         addr = addr.replace("&e", "ße")
         addr = addr.replace("Sc8hillerhoehe", "Schillerhoehe")
         data["beneficiary_address"] = re.sub(r",\s*$", "", addr)
@@ -391,9 +403,12 @@ def extract(text, words=None):
         r"|[^\n]*\n(?:[^\n]*\n){0,3}?[^\n]*Private\s+Ltd)",
         text, re.IGNORECASE
     )
+    m_mobility = re.search(r"Bosch\s+Mobility\s+Platform", text, re.I)
     m_ltd        = re.search(r"Bosch\s+L[\s_I|l]*td[\s_I|l]*\.", text, re.IGNORECASE)
 
-    if m_limited:
+    if m_mobility:
+        data["remitter_name"] = "Bosch Mobility Platform and Solutions India Private Limited"
+    elif m_limited:
         data["remitter_name"] = "BOSCH LIMITED"
     elif m_rexroth:
         data["remitter_name"] = "Bosch Rexroth (India) Private Limited"
@@ -430,6 +445,14 @@ def extract(text, words=None):
     # Strategy 1.6: Chassis Systems — bill-to block
     if not matched and m_chassis:
         block_lines = _extract_bill_to_block(text, r"Bosch\s+Chassis\s+Systems\s+India")
+        if block_lines:
+            addr = _clean_address_text(", ".join(block_lines))
+            data["remitter_address"] = _normalize_pincode_city(addr)
+            matched = True
+
+    # Strategy 1.7: Mobility Platform — bill-to block
+    if not matched and m_mobility:
+        block_lines = _extract_bill_to_block(text, r"Bosch\s+Mobility\s+Platform")
         if block_lines:
             addr = _clean_address_text(", ".join(block_lines))
             data["remitter_address"] = _normalize_pincode_city(addr)

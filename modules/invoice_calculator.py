@@ -325,7 +325,11 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
             form["AmtPayIndianTds"] = str(int(tds_inr_rounded))
             form["TaxPayGrossSecb"] = "Y"
             form["AmtPayForgnTds"] = f"{tds_fcy:.2f}"
-            # In gross-up, contractual remittance is the beneficiary's net receipt.
+            # In gross-up, remitter bears TDS on top of the net invoice amount.
+            # AmtPayForgnRem = GROSS (net + TDS) = total leaving India.
+            # ActlAmtTdsForgn = GROSS - TDS = net invoice = what vendor actually receives.
+            gross_fcy = (invoice_fcy + tds_fcy).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            form["AmtPayForgnRem"] = _fmt_num(float(gross_fcy))
             form["ActlAmtTdsForgn"] = _fmt_num(float(invoice_fcy))
             form["BasisDeterTax"] = f"{basis_text} GROSS-UP APPLIED (TAX BORNE BY REMITTER).".strip()
             form["RateTdsSecB"] = _fmt_num(float(gross_rate_dec))
@@ -727,6 +731,7 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
     # (avoiding duplication from Gemini extraction)
     if remitter_address and remitter_address not in name_remitter.upper():
         name_remitter = f"{name_remitter}. {remitter_address}".strip(". ").strip()
+    name_remitter = name_remitter.upper()
     
     name_remittee = _build_name_remittee(beneficiary, invoice_no, dotted)
     raw_relevant_dtaa = str(form.get("RelevantDtaa") or "").strip()

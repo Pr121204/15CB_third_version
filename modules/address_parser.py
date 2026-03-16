@@ -424,8 +424,14 @@ def parse_beneficiary_address(address_str: str) -> Dict[str, str]:
                 m = all_num[-1]
                 street = raw_part[: m.start()].strip().rstrip(",").strip()
                 city = raw_part[m.end() :].strip().lstrip(",").strip()
+                # Discard bare country-code prefixes like "D-", "A-", "CH-"
+                # that remain after ZIP extraction from "D-71301 Waiblingen".
+                if re.match(r"^[A-Z]{1,2}-$", street):
+                    street = ""
                 if street and city:
                     result["FlatDoorBuilding"] = street
+                    result["TownCityDistrict"] = city
+                elif city:
                     result["TownCityDistrict"] = city
                 elif street:
                     result["FlatDoorBuilding"] = street

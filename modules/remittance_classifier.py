@@ -609,7 +609,7 @@ def classify_remittance(invoice_text: str, extracted: Optional[Dict[str, str]] =
 
     best_code, best, second = _pick_best(p_scores)
     if not best_code or best_code not in purpose_map:
-        best_code = "S1099" if "S1099" in purpose_map else next(iter(purpose_map.keys()))
+        best_code = "S1023" if "S1023" in purpose_map else next(iter(purpose_map.keys()))
         best, second = 0.0, 0.0
 
     p = purpose_map[best_code]
@@ -617,14 +617,14 @@ def classify_remittance(invoice_text: str, extracted: Optional[Dict[str, str]] =
     # 6) Nature selection: generic fallback when there is no clear nature evidence.
     ncode, _, _ = _pick_best(n_scores)
     if not ncode or ncode not in nature_map:
-        ncode = "16.6" if "16.6" in nature_map else next(iter(nature_map.keys()))
+        ncode = "16.21" if "16.21" in nature_map else next(iter(nature_map.keys()))
 
     n = nature_map[ncode]
 
     conf = _confidence(best, second, explicit=False)
     if no_signal:
         conf = 0.30
-    elif best_code == "S1099" and not specific_signal:
+    elif best_code == "S1023" and not specific_signal:
         conf = min(conf, 0.45)
 
     # 7. Hybrid fallback: if confidence < 0.7, prefer Gemini's original extraction
@@ -652,8 +652,8 @@ def classify_remittance(invoice_text: str, extracted: Optional[Dict[str, str]] =
     # - nature says “OTHER…”
     needs_review = (
         conf < 0.75
-        or best_code == "S1099"
-        or n.code in {"16.6", "16.99"}
+        or best_code == "S1023"
+        or n.code in {"16.21", "16.99"}
     )
 
     evidence = hits[:2]

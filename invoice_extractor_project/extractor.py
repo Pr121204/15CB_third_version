@@ -2,7 +2,7 @@ import re, json, os
 from pdf_reader import extract_pdf_data_with_ocr_fallback
 from invoice_router import detect_invoice_type
 from text_utils import remove_hex_strings, normalize_address
-from extractors import bosch_vietnam, bosch_germany, bosch_sap, bosch_sap_de, generic, sap_se
+from extractors import bosch_vietnam, bosch_germany, bosch_sap, bosch_sap_de, generic, sap_se, syntegon
 
 
 def detect_template(text):
@@ -30,6 +30,8 @@ def detect_template(text):
     first_lines = "\n".join(text.splitlines()[:5])
     if re.search(r"^Bosch\b", first_lines, re.IGNORECASE | re.MULTILINE):
         return "bosch_germany"
+    if re.search(r"Syntegon\s+Technology", text, re.IGNORECASE):
+        return "syntegon"
     return "generic"
 
 
@@ -54,6 +56,8 @@ def process_pdf(path):
         data = bosch_sap.extract(text, words)
     elif inv_type == "sap_se":
         data = sap_se.extract(text, words)
+    elif inv_type == "syntegon":
+        data = syntegon.extract(text, words)
     else:
         try:
             data = generic.extract(text, words)
@@ -71,7 +75,7 @@ def process_file(path):
 
 
 if __name__ == "__main__":
-    INPUT_PATH = r"C:\Users\HP\Downloads\7135421931\7135421931.pdf"
+    INPUT_PATH = r"C:/Users/HP/Downloads/fwd15cbsyntegontechnologygmbh93547812935483579354/93548357.pdf"
     results = process_file(INPUT_PATH)
     print(json.dumps(results, indent=2, ensure_ascii=False))
 
