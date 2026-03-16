@@ -135,7 +135,7 @@ def clean_beneficiary_name(name: str) -> str:
         return ""
     for pattern in _BENEFICIARY_NOISE_PATTERNS:
         text = pattern.sub("", text).strip()
-    return text.strip(" .,-")
+    return text.strip(" .,-").upper()
 
 
 def get_effective_it_rate(rate: float | None = None) -> tuple[float, str]:

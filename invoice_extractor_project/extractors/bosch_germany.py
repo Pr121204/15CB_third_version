@@ -48,7 +48,8 @@ _NAME_WRAP_RE = re.compile(
 _RIGHT_COL_NOISE_RE = re.compile(
     r"(?:\s+|^)(?:[©®]\s*)?(?:Ship\s+to|Customer\s+No|Contact\s+addr(?:esses)?|Sales\s*:|"
     r"Accounting\s*:|Sz[áa]mla|Vev[oő]sz[áa]m|[Áá]rufogad[oó]|"
-    r"Payer|Invoice\s+No|Date\s+Invoice|Supplier|PO\s+Number|Order\s+date|Order\s+from|Customer\s+no).*",
+    r"Payer|Invoice\s+No|Date\s+Invoice|Supplier|PO\s+Number|Order\s+date|Order\s+from|Customer\s+no|"
+    r"licence\s+YEC|Manufacturing\s+licence|Royalty\s+calculation).*",
     re.IGNORECASE,
 )
 
@@ -63,14 +64,14 @@ def _normalize_name(raw):
     name = raw.strip()
     name = re.sub(r"^[a-z]\s+", "", name)
     name = re.sub(r"^BOSCH\s+(?=Bosch)", "", name, flags=re.IGNORECASE)
-    # Strip address leaks e.g. "Bosch Rexroth AG, Zum Eisengiefer..."
-    name = re.sub(r",?\s+\bZum\s+Eisengiefer.*$", "", name, flags=re.IGNORECASE)
+    # Strip address leaks e.g. "Bosch Rexroth AG, Zum Eisengief/ßer..."
+    name = re.sub(r",?\s+\bZum\s+Eisengie[sßf]er.*$", "", name, flags=re.IGNORECASE)
     # Strip trailing standalone brand-logo token (e.g. 'Robert Bosch GmbH BOSCH')
     name = re.sub(
         r"\s+(?!GmbH|KFT|NV|BV|SE|AG|AB|AS|LLC|INC|LTD)[A-Z]{2,8}\s*$",
         "", name
     ).strip()
-    return name if name else raw
+    return (name if name else raw).upper()
 
 
 def _clean_dispatch_line(text):
@@ -250,13 +251,16 @@ def extract(text, words=None):
         _l = _l.strip()
         if not _l:
             continue
+        # Skip solo "Page" or "Invoice" lines unless they contain "Bosch"
+        if re.search(r"^(Page\s*[\d/ ]+|Invoice\s*[\d/ ]*)$", _l, re.IGNORECASE) and not re.search(r"Bosch", _l, re.I):
+            continue
         _l = re.sub(r"\s*/\s*\d.*$", "", _l).strip()   # strip "/ 2" page suffixes
         if not _l:
             continue
         if re.search(
             r"\b(Invoice|Sz[áa]mla|BillingDocument|Billing\s+Document|Page)\b",
             _l, re.IGNORECASE
-        ):
+        ) and len(_l) < 20 and not re.search(r"Bosch", _l, re.I):
             break
         _name_lines.append(_l)
         if re.search(
@@ -312,21 +316,33 @@ def extract(text, words=None):
         r"Company\s+(?:address|ad\.)\s*:?\s*(.+)",
         _ca_text, re.IGNORECASE
     )
+    # Rexroth header pattern is highly specific and reliable
+    m_rh = re.search(r"Bosch\s+Rexroth\s+AG,?\s*(Zum\s+Eisengie[sßf]er.*)", text, re.I)
+
     if m_ca:
         addr = m_ca.group(1).strip().rstrip(",").strip()
         addr = addr.replace("&e", "ße")
         addr = addr.replace("Sc8hillerhoehe", "Schillerhoehe")
         data["beneficiary_address"] = re.sub(r",\s*$", "", addr)
+    elif m_rh:
+        data["beneficiary_address"] = m_rh.group(1).split("\n")[0].strip()
     else:
         # Headquarter line — use coordinate reconstruction to fix split diacritic chars
-        # e.g. pdfplumber renders "Gyömrői" as "Gyömrő" + "i" at slightly different y
         hq_line = reconstruct_line_from_words(words or [], "Headquarter") if words else ""
+        # Filter out footers like "Firmensitz/Headquarters"
+        if hq_line and re.search(r"Registration|HRB|Amtsgericht|Stuttgart", hq_line, re.I):
+            hq_line = ""
+
         if not hq_line:
             # Anchor to start of line to avoid registration sections like "Firmensitz/Headquarters"
-            m_hq = re.search(r"^Headquarter\s*:?\s*(.+)", text, re.IGNORECASE | re.M)
-            hq_line = m_hq.group(1).strip().rstrip(".") if m_hq else ""
+            m_hq = re.search(r"^Headquarter\s*:?\s*(.+)", text, re.I | re.M)
+            if m_hq and not re.search(r"Registration|HRB|Amtsgericht|Stuttgart", m_hq.group(0), re.I):
+                hq_line = m_hq.group(1).strip().rstrip(".")
+            else:
+                hq_line = ""
+
         if hq_line:
-            hq_line = re.sub(r"^.*?Headquarter\s*:?\s*", "", hq_line, flags=re.IGNORECASE).strip()
+            hq_line = re.sub(r"^.*?Headquarter\s*:?\s*", "", hq_line, flags=re.I).strip()
             data["beneficiary_address"] = hq_line
         else:
             # Siège Social — French entities footer pattern
@@ -341,15 +357,15 @@ def extract(text, words=None):
                 addr = addr.replace("&e", "ße")
                 data["beneficiary_address"] = addr
             else:
-                # Bangladesh specific address pattern (Gulshan/Dhaka)
+                # Bangladesh specific address pattern (House-.*?Bangladesh)
                 m_bd = re.search(r"(House-.*?Bangladesh)", text, re.IGNORECASE | re.S)
                 if m_bd:
                     addr = m_bd.group(1).replace("\n", " ")
                     addr = re.sub(r"\s{2,}", " ", addr).strip()
                     data["beneficiary_address"] = addr
                 else:
-                    # Rexroth header pattern "Bosch Rexroth AG, Zum Eisengiefer 1, ..."
-                    m_rh = re.search(r"Bosch\s+Rexroth\s+AG,?\s*(Zum\s+Eisengiefer.*)", text, re.IGNORECASE)
+                    # Rexroth header pattern "Bosch Rexroth AG, Zum Eisengief/ßer 1, ..."
+                    m_rh = re.search(r"Bosch\s+Rexroth\s+AG,?\s*(Zum\s+Eisengie[sßf]er.*)", text, re.I)
                     if m_rh:
                         data["beneficiary_address"] = m_rh.group(1).split("\n")[0].strip()
                     else:

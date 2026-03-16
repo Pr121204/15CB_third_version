@@ -49,15 +49,14 @@ def _decompress(s):
 
 
 def _normalize_amount(raw):
-    """Handle both US (1,234.56) and European (1.234,56) number formats."""
-    raw = raw.strip()
-    # European: groups of 3 separated by dots, comma decimal → 1.234,56
-    if re.match(r"^\d{1,3}(\.\d{3})*,\d{2}$", raw):
-        integer = raw.rsplit(",", 1)[0].replace(".", "")
-        decimal = raw.rsplit(",", 1)[1]
-        return f"{int(integer):,}.{decimal}"
-    # Already US format or simple number — return as-is
-    return raw
+    """
+    Parse EU/US/OCR amount strings into a plain decimal string.
+    Uses the shared robust parser from text_utils.
+    Returns "" when the value cannot be interpreted as a number.
+    """
+    from text_utils import parse_invoice_amount  # type: ignore
+    result = parse_invoice_amount(raw)
+    return str(result) if result is not None else ""
 
 
 def extract(text, words=None):

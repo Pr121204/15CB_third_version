@@ -323,18 +323,23 @@ def _rebuild_state_from_extracted(inv_id: str, inv: Dict[str, Any]) -> None:
 
 
 def _reset_invoice_states() -> None:
-    """Recompute invoices after a global change, preserving per-invoice overrides.
+    """Recompute invoices after a global change, clearing all per-invoice overrides.
 
-    When the user toggles the global mode, gross-up, IT Act rate or calculation
-    basis controls we recompute derived state from existing extracted data.
-    All per-invoice overrides (mode, gross, it_act_rate, non_tds_rate_mode) are
-    intentionally preserved so that individual invoice customisations survive
-    global changes.  No Gemini calls occur during this function.
+    When the user changes any global control (mode, gross-up, IT Act rate,
+    calculation basis) all per-invoice overrides are cleared so every invoice
+    inherits the new global values.  State is rebuilt from existing extracted
+    data where available.  No Gemini calls occur during this function.
     """
     state_ref = _get_current_state()
     logger.info("reset_invoice_states_started mode=%s", st.session_state.get("mode"))
     invoices = state_ref["invoices"]
     for inv_id, inv in invoices.items():
+        # Clear all per-invoice overrides so invoices follow the new global values
+        inv["mode_override"] = None
+        inv["gross_override"] = None
+        inv["it_act_rate_override"] = None
+        inv["non_tds_rate_mode_override"] = None
+
         if inv.get("extracted"):
             # memoized rebuild: only rebuild if config signature changed
             new_sig = _compute_config_sig(inv)
@@ -553,7 +558,7 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                     _candidate = map_local_to_gemini_format(
                         _local_raw, _local_text, inv.get("excel", {})
                     )
-                    if check_local_completeness(_candidate):
+                    if check_local_completeness(_candidate, inv_id=inv_id):
                         extracted = _candidate
                         _use_local = True
                         logger.info(

@@ -71,7 +71,7 @@ def process_file(path):
 
 
 if __name__ == "__main__":
-    INPUT_PATH = r"C:/Users/HP/Downloads/fwd15cbmissing/70615625.pdf"
+    INPUT_PATH = r"C:/Users/HP/Downloads/fwdrequesting15cbfordcin/9027584389.pdf"
     results = process_file(INPUT_PATH)
     print(json.dumps(results, indent=2, ensure_ascii=False))
 

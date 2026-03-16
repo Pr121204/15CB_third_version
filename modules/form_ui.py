@@ -146,7 +146,7 @@ def _ensure_state_defaults() -> None:
 
 def _on_remitter_change() -> None:
     fields = st.session_state["extracted_fields"]
-    remitter_name = st.session_state.get("ui_name_remitter", "").strip()
+    remitter_name = st.session_state.get("ui_name_remitter", "").strip().upper()
     fields["NameRemitter"] = remitter_name
     rec = find_indian_company(remitter_name)
     if rec:
@@ -157,11 +157,11 @@ def _on_remitter_change() -> None:
 
 def _on_beneficiary_change() -> None:
     fields = st.session_state["extracted_fields"]
-    beneficiary_name = st.session_state.get("ui_name_remittee", "").strip()
+    beneficiary_name = st.session_state.get("ui_name_remittee", "").strip().upper()
     fields["NameRemittee"] = beneficiary_name
     rec = find_foreign_company(beneficiary_name)
     if rec and rec.get("name"):
-        fields["NameRemittee"] = str(rec.get("name")).strip()
+        fields["NameRemittee"] = str(rec.get("name")).strip().upper()
     country_hint = fields.get("RemitteeTownCityDistrict") or fields.get("RelevantDtaa") or ""
     dtaa = find_dtaa(country_hint)
     if dtaa:
@@ -328,8 +328,8 @@ def render_form() -> Dict[str, str]:
     fields["IorWe"] = "02"
     fields["RemitterHonorific"] = "03"
     fields["BeneficiaryHonorific"] = "03"
-    fields["NameRemitter"] = st.session_state.get("ui_name_remitter", fields.get("NameRemitter", ""))
-    fields["NameRemittee"] = st.session_state.get("ui_name_remittee", fields.get("NameRemittee", ""))
+    fields["NameRemitter"] = st.session_state.get("ui_name_remitter", fields.get("NameRemitter", "")).upper()
+    fields["NameRemittee"] = st.session_state.get("ui_name_remittee", fields.get("NameRemittee", "")).upper()
     if fields.get("NameRemitter", "").strip() and not fields.get("RemitterPAN", "").strip():
         rec = find_indian_company(fields["NameRemitter"])
         if rec and rec.get("pan"):

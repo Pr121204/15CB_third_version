@@ -183,30 +183,31 @@ def _normalize_date(raw: str) -> Tuple[str, str, str]:
 
 def _clean_amount(raw: str) -> str:
     """
-    Strip thousands commas and non-numeric characters from an amount string.
+    Parse an OCR amount string into a plain decimal string suitable for
+    float() conversion.  Handles EU (1.234,56), US (1,234.56), plain
+    decimals, spaces as thousands separators, currency symbols, and common
+    OCR noise (letter-O instead of zero, etc.).
 
-    The individual extractors already convert European format to US format:
-      289.500,00 → 289,500.00  (via _normalize_amount in each extractor)
-    So the only clean-up needed here is removing the thousands commas.
+    Returns "" when the value cannot be parsed as a positive number.
 
     Examples:
-      "2,935.29"   → "2935.29"
-      "289,500.00" → "289500.00"
-      "2935.29"    → "2935.29"
-      "EUR 2,935"  → "2935"
-      ""           → ""
+      "2,935.29"    → "2935.29"
+      "289.500,00"  → "289500.0"   (EU thousands-dot + comma-decimal)
+      "289,500.00"  → "289500.0"
+      "EUR 1.234,56"→ "1234.56"
+      "538,25"      → "538.25"     (comma-decimal, no thousands)
+      "2935.29"     → "2935.29"
+      ""            → ""
     """
     if not raw:
         return ""
-    # Remove currency symbols, letters, spaces — keep only digits, dot, comma
-    s = re.sub(r"[^\d.,]", "", raw.strip())
-    if not s:
+    from text_utils import parse_invoice_amount  # type: ignore
+    result = parse_invoice_amount(raw)
+    if result is None:
         return ""
-    if "." in s:
-        # US format: dot is the decimal separator, commas are thousands → remove commas
-        return s.replace(",", "")
-    # No decimal dot: commas are either thousands separators or irrelevant
-    return s.replace(",", "")
+    # Format as a plain decimal string (no trailing ".0" for whole numbers
+    # only when there are no cents — preserve cents precision)
+    return str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -239,25 +240,26 @@ _VALID_CURRENCIES = {
 }
 
 
-def check_local_completeness(mapped: Dict) -> bool:
+def check_local_completeness(mapped: Dict, inv_id: str = "") -> bool:
     """
     Return True only when every critical field is populated AND each value
     passes basic sanity checks.  Any failure causes Gemini fallback.
     """
+    tag = f"invoice_id={inv_id} " if inv_id else ""
     for field in _CRITICAL_FIELDS:
         val = str(mapped.get(field, "") or "").strip()
         if not val:
-            logger.debug("local_completeness_fail field=%s", field)
+            logger.info("local_completeness_fail %sreason=blank_field field=%s — Gemini will be called", tag, field)
             return False
 
     # Amount must parse as a positive number
     try:
         amt = float(mapped["amount"])
         if amt <= 0:
-            logger.debug("local_completeness_fail amount_not_positive=%s", mapped["amount"])
+            logger.info("local_completeness_fail %sreason=amount_not_positive value=%s — Gemini will be called", tag, mapped["amount"])
             return False
     except (ValueError, TypeError):
-        logger.debug("local_completeness_fail amount_not_numeric=%s", mapped["amount"])
+        logger.info("local_completeness_fail %sreason=amount_not_numeric value=%s — Gemini will be called", tag, mapped["amount"])
         return False
 
     # Currency must be a known 3-letter code.
@@ -266,18 +268,18 @@ def check_local_completeness(mapped: Dict) -> bool:
     # row had no usable currency — Gemini is the only option.
     curr = str(mapped.get("currency_short", "") or "").strip().upper()
     if len(curr) != 3 or curr not in _VALID_CURRENCIES:
-        logger.debug("local_completeness_fail invalid_currency=%s", curr)
+        logger.info("local_completeness_fail %sreason=invalid_currency value=%s — Gemini will be called", tag, curr)
         return False
 
     # Country must NOT still be a bare 2-letter ISO code (expansion failed)
     country = str(mapped.get("beneficiary_country_text", "") or "").strip()
     if re.match(r"^[A-Z]{2}$", country.upper()) and country.upper() not in {"US", "UK"}:
-        logger.debug("local_completeness_fail unexpanded_country=%s", country)
+        logger.info("local_completeness_fail %sreason=unexpanded_country value=%s — Gemini will be called", tag, country)
         return False
 
     # Beneficiary country must not be India (would swap remitter/beneficiary)
     if "india" in country.lower():
-        logger.debug("local_completeness_fail beneficiary_is_india")
+        logger.info("local_completeness_fail %sreason=beneficiary_is_india — Gemini will be called", tag)
         return False
 
     # Beneficiary name/address must not contain "India" — catches cases where
@@ -285,12 +287,12 @@ def check_local_completeness(mapped: Dict) -> bool:
     bene_name = str(mapped.get("beneficiary_name", "") or "").strip()
     bene_addr = str(mapped.get("beneficiary_address", "") or "").strip()
     if "india" in bene_name.lower() or "india" in bene_addr.lower():
-        logger.debug("local_completeness_fail india_in_beneficiary_name_or_address")
+        logger.info("local_completeness_fail %sreason=india_in_beneficiary_name_or_address — Gemini will be called", tag)
         return False
 
     # Beneficiary name too long — almost certainly grabbed an address block
     if len(bene_name) > 200:
-        logger.debug("local_completeness_fail beneficiary_name_too_long len=%d", len(bene_name))
+        logger.info("local_completeness_fail %sreason=beneficiary_name_too_long len=%d — Gemini will be called", tag, len(bene_name))
         return False
 
     return True
@@ -353,10 +355,10 @@ def map_local_to_gemini_format(
 
     return {
         # ── Core invoice fields ───────────────────────────────────────────
-        "remitter_name":              str(raw_fields.get("remitter_name", "") or "").strip(),
+        "remitter_name":              str(raw_fields.get("remitter_name", "") or "").strip().upper(),
         "remitter_address":           str(raw_fields.get("remitter_address", "") or "").strip(),
         "remitter_country_text":      remi_country,
-        "beneficiary_name":           str(raw_fields.get("beneficiary_name", "") or "").strip(),
+        "beneficiary_name":           str(raw_fields.get("beneficiary_name", "") or "").strip().upper(),
         "beneficiary_address":        str(raw_fields.get("beneficiary_address", "") or "").strip(),
         "beneficiary_country_text":   bene_country,
         "invoice_number":             str(raw_fields.get("invoice_number", "") or "").strip(),

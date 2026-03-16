@@ -42,13 +42,14 @@ def _clean(s):
 
 
 def _normalize_amount(s):
-    """'225.00' stays; '1.939,31' (European) → '1,939.31'."""
-    s = s.strip()
-    if re.match(r"^\d{1,3}(\.\d{3})*,\d{2}$", s):
-        integer = s.rsplit(",", 1)[0].replace(".", "")
-        decimal = s.rsplit(",", 1)[1]
-        return f"{int(integer):,}.{decimal}"
-    return s
+    """
+    Parse EU/US/OCR amount strings into a plain decimal string.
+    Uses the shared robust parser from text_utils.
+    Returns "" when the value cannot be interpreted as a number.
+    """
+    from text_utils import parse_invoice_amount  # type: ignore
+    result = parse_invoice_amount(s)
+    return str(result) if result is not None else ""
 
 
 # ── Main extractor ─────────────────────────────────────────────────────────────

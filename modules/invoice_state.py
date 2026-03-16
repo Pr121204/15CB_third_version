@@ -512,7 +512,7 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
         },
     )
     # Seed identity/reference fields for review UI from extraction.
-    form["NameRemitterInput"] = str(extracted.get("remitter_name") or "").strip()
+    form["NameRemitterInput"] = str(extracted.get("remitter_name") or "").strip().upper()
     cleaned_beneficiary_name = clean_beneficiary_name(str(extracted.get("beneficiary_name") or ""))
     form["NameRemitteeInput"] = cleaned_beneficiary_name
     form["NameRemittee"] = cleaned_beneficiary_name
@@ -553,7 +553,7 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
     ).upper()
     beneficiary_name = normalize_single_line_text(
         clean_beneficiary_name(str(extracted.get("beneficiary_name") or ""))
-    )
+    ).upper()
 
     # Country recovery: if Gemini returned a junk/null country (e.g. "N/A"),
     # attempt to derive the country deterministically from the raw address text
