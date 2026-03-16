@@ -355,9 +355,7 @@ HIGH_SIGNAL_RULES: List[HighSignalRule] = [
     {"purpose_code": "S0902", "nature_code": "16.52", "weight": 65,
      "patterns": [
          r"\bsoftware\s+licen[cs]e(s)?\b", r"\bsoftware\s+licen[cs]es\b", r"\blicen[cs]ing\b",
-         r"\bentitlement\b",       # SAP cloud licensing term for subscription-based products
-         r"\btenants?\b",          # SAP cloud billing unit (e.g. "1 ST (Tenants)")
-         r"\bcloud\s+tdd\b",       # SAP "Cloud Test, Demo and Development" license tier
+         r"\bentitlement\b",  # SAP cloud licensing term for subscription-based products
      ]},
     {"purpose_code": "S0902", "nature_code": "16.48", "weight": 80,
      "patterns": [r"\broyalty\b"]},

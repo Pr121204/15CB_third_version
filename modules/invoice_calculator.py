@@ -295,8 +295,10 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         it_factor, basis_text = get_effective_it_rate(selected_it_rate)
         it_rate_dec = Decimal(str(it_factor))
 
-        # Use DTAA rate for gross-up when available; fall back to IT Act rate.
-        dtaa_available = dtaa_rate_percent is not None
+        # UI calculation basis takes priority: when user selected IT Act, DTAA must
+        # not override — even in gross-up mode.
+        dtaa_mode = form.get("dtaa_mode")
+        dtaa_available = dtaa_rate_percent is not None and dtaa_mode != "it_act"
         gross_rate_dec = Decimal(str(dtaa_rate_percent)) if dtaa_available else it_rate_dec
 
         if gross_rate_dec < 100:

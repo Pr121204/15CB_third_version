@@ -783,14 +783,22 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
 
         raw_text = str(extracted.get("_raw_invoice_text") or "")
         if not raw_text.strip():
-            # If OCR failed entirely, build a synthetic probe from high-signal fields
+            # If OCR failed entirely, build a synthetic probe from high-signal fields.
+            # NOTE: do NOT include purpose_code here — the classifier's _explicit_s_code
+            # detector would find it and hard-override classification with Gemini's own
+            # guess, bypassing all keyword rules.
+            line_items_raw = extracted.get("line_items") or []
+            if isinstance(line_items_raw, list):
+                line_items_text = " ".join(str(li) for li in line_items_raw)
+            else:
+                line_items_text = str(line_items_raw)
             raw_text = " ".join(
-                [
+                filter(None, [
                     str(extracted.get("invoice_number") or ""),
                     str(extracted.get("beneficiary_name") or ""),
-                    str(extracted.get("purpose_code") or ""),
                     str(extracted.get("nature_of_remittance") or ""),
-                ]
+                    line_items_text,
+                ])
             )
         cls = classify_remittance(raw_text, extracted)
         if cls:

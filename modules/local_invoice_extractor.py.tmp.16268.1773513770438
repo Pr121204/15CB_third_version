@@ -1,0 +1,464 @@
+"""
+Local Invoice Extractor — Gemini-free extraction for known Bosch templates.
+
+Tries to extract invoice fields using the deterministic regex/PDF extractors
+in invoice_extractor_project/. If extraction is complete and valid, the caller
+can skip the Gemini API call entirely. Falls back to Gemini for:
+  - Unrecognized invoice formats (template = "generic")
+  - Any critical field missing after extraction
+  - Any exception (missing dependencies, malformed PDF, etc.)
+
+The dict returned by map_local_to_gemini_format() is key-for-key identical to
+the dict returned by invoice_gemini_extractor.extract_invoice_core_fields(),
+so the rest of the pipeline (build_invoice_state, recompute_invoice, XML
+generation) requires zero changes.
+"""
+
+import logging
+import os
+import re
+import sys
+import tempfile
+from typing import Dict, Optional, Tuple
+
+from dateutil import parser as _dateutil_parser
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Import invoice_extractor_project modules
+# ---------------------------------------------------------------------------
+# The extractor package lives one level up from modules/ and uses flat (non-
+# namespaced) imports like "from text_utils import …", so we add its directory
+# to sys.path.  This is safe: none of its module names shadow stdlib modules.
+
+_EXTRACTOR_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "invoice_extractor_project")
+)
+if _EXTRACTOR_DIR not in sys.path:
+    sys.path.insert(0, _EXTRACTOR_DIR)
+
+_extractor_imported = False
+try:
+    from pdf_reader import extract_pdf_data_with_ocr_fallback  # type: ignore
+    from text_utils import remove_hex_strings  # type: ignore
+    from extractor import detect_template  # type: ignore
+    from extractors import bosch_vietnam, bosch_germany, bosch_sap, bosch_sap_de  # type: ignore
+
+    _extractor_imported = True
+except Exception as _import_err:
+    logger.warning(
+        "local_invoice_extractor: import_failed reason=%s — Gemini will always be used",
+        _import_err,
+    )
+
+# ---------------------------------------------------------------------------
+# ISO-2 country code → full country name
+# ---------------------------------------------------------------------------
+# bosch_sap_de and bosch_sap return ISO-2 codes (e.g. "DE") from VAT ID
+# detection.  bosch_germany and bosch_vietnam return full names already.
+# build_invoice_state does a case-insensitive full-name lookup against
+# data/master/country_codes.json, so we must expand codes before passing on.
+
+_ISO2_TO_NAME: Dict[str, str] = {
+    "AE": "United Arab Emirates",
+    "AT": "Austria",
+    "AU": "Australia",
+    "BD": "Bangladesh",
+    "BE": "Belgium",
+    "BR": "Brazil",
+    "CA": "Canada",
+    "CH": "Switzerland",
+    "CN": "China",
+    "CZ": "Czech Republic",
+    "DE": "Germany",
+    "DK": "Denmark",
+    "EG": "Egypt",
+    "ES": "Spain",
+    "FI": "Finland",
+    "FR": "France",
+    "GB": "United Kingdom",
+    "GR": "Greece",
+    "HK": "Hong Kong",
+    "HR": "Croatia",
+    "HU": "Hungary",
+    "ID": "Indonesia",
+    "IN": "India",
+    "IT": "Italy",
+    "JP": "Japan",
+    "KR": "Korea",
+    "MX": "Mexico",
+    "MY": "Malaysia",
+    "NL": "Netherlands",
+    "NO": "Norway",
+    "PH": "Philippines",
+    "PL": "Poland",
+    "PT": "Portugal",
+    "RO": "Romania",
+    "RS": "Serbia",
+    "SE": "Sweden",
+    "SG": "Singapore",
+    "SI": "Slovenia",
+    "SK": "Slovakia",
+    "TH": "Thailand",
+    "TR": "Turkey",
+    "TW": "Taiwan",
+    "UA": "Ukraine",
+    "US": "United States",
+    "VN": "Vietnam",
+    "ZA": "South Africa",
+}
+
+
+def _expand_country(val: str) -> str:
+    """
+    Expand an ISO-2 country code to its full name.
+    Leaves full names (e.g. "Germany", "Czech Republic") unchanged.
+    Handles the Austrian VAT prefix "ATU" as a special case.
+    """
+    if not val:
+        return val
+    s = val.strip()
+    upper = s.upper()
+    # Bare 2-letter code
+    if re.match(r"^[A-Z]{2}$", upper):
+        return _ISO2_TO_NAME.get(upper, s)
+    # Austrian VAT ID prefix
+    if upper == "ATU":
+        return "Austria"
+    # Already a full name (contains lowercase or spaces)
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Date normalisation
+# ---------------------------------------------------------------------------
+
+def _normalize_date(raw: str) -> Tuple[str, str, str]:
+    """
+    Parse a raw date string and return (raw, iso, display).
+
+    iso    = "YYYY-MM-DD"  or ""  when parsing fails
+    display = "DD/MM/YYYY" or raw when parsing fails
+
+    Edge cases that return iso="":
+      - Empty string
+      - Bare year like "2025"  (dateutil would silently parse as 2025-01-01)
+      - 1-2 digit numbers      (stray tokens from OCR)
+      - Truly unparseable text
+    """
+    if not raw:
+        return "", "", ""
+    raw = raw.strip()
+
+    # Guard: bare year — would be silently parsed as Jan 1 of that year
+    if re.match(r"^\d{4}$", raw):
+        return raw, "", raw
+
+    # Guard: stray 1-2 digit OCR token
+    if re.match(r"^\d{1,2}$", raw):
+        return raw, "", raw
+
+    # First attempt: strict (no fuzzy) with dayfirst=True
+    # Handles: DD.MM.YYYY  DD/MM/YYYY  DD-MM-YYYY  DD-Mon-YYYY  YYYY-MM-DD
+    try:
+        dt = _dateutil_parser.parse(raw, dayfirst=True, fuzzy=False)
+        return raw, dt.strftime("%Y-%m-%d"), dt.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+
+    # Second attempt: fuzzy — handles stray text like "Date: 26.11.2025"
+    try:
+        dt = _dateutil_parser.parse(raw, dayfirst=True, fuzzy=True)
+        return raw, dt.strftime("%Y-%m-%d"), dt.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+
+    return raw, "", raw
+
+
+# ---------------------------------------------------------------------------
+# Amount cleaning
+# ---------------------------------------------------------------------------
+
+def _clean_amount(raw: str) -> str:
+    """
+    Strip thousands commas and non-numeric characters from an amount string.
+
+    The individual extractors already convert European format to US format:
+      289.500,00 → 289,500.00  (via _normalize_amount in each extractor)
+    So the only clean-up needed here is removing the thousands commas.
+
+    Examples:
+      "2,935.29"   → "2935.29"
+      "289,500.00" → "289500.00"
+      "2935.29"    → "2935.29"
+      "EUR 2,935"  → "2935"
+      ""           → ""
+    """
+    if not raw:
+        return ""
+    # Remove currency symbols, letters, spaces — keep only digits, dot, comma
+    s = re.sub(r"[^\d.,]", "", raw.strip())
+    if not s:
+        return ""
+    if "." in s:
+        # US format: dot is the decimal separator, commas are thousands → remove commas
+        return s.replace(",", "")
+    # No decimal dot: commas are either thousands separators or irrelevant
+    return s.replace(",", "")
+
+
+# ---------------------------------------------------------------------------
+# Completeness check
+# ---------------------------------------------------------------------------
+
+# Fields that MUST be non-empty for local extraction to be trusted.
+# currency_short and remitter_country_text are intentionally excluded:
+#   - currency falls back to Excel/manual selection when the extractor misses it
+#   - remitter_country defaults to "India" when missing
+# If any field in this list is empty, Gemini is called instead.
+_CRITICAL_FIELDS = [
+    "beneficiary_name",
+    "beneficiary_country_text",
+    "beneficiary_address",
+    "remitter_name",
+    "remitter_address",
+    "invoice_number",
+    "invoice_date_iso",
+    "amount",
+]
+
+# Recognised 3-letter currency codes.  An extracted currency NOT in this set
+# signals a parse error and triggers Gemini fallback.
+_VALID_CURRENCIES = {
+    "AED", "AUD", "BDT", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK",
+    "EUR", "GBP", "HKD", "HUF", "IDR", "INR", "JPY", "KRW", "MXN",
+    "MYR", "NOK", "PHP", "PLN", "RON", "SEK", "SGD", "THB", "TWD",
+    "UAH", "USD", "VND", "ZAR",
+}
+
+
+def check_local_completeness(mapped: Dict) -> bool:
+    """
+    Return True only when every critical field is populated AND each value
+    passes basic sanity checks.  Any failure causes Gemini fallback.
+    """
+    for field in _CRITICAL_FIELDS:
+        val = str(mapped.get(field, "") or "").strip()
+        if not val:
+            logger.debug("local_completeness_fail field=%s", field)
+            return False
+
+    # Amount must parse as a positive number
+    try:
+        amt = float(mapped["amount"])
+        if amt <= 0:
+            logger.debug("local_completeness_fail amount_not_positive=%s", mapped["amount"])
+            return False
+    except (ValueError, TypeError):
+        logger.debug("local_completeness_fail amount_not_numeric=%s", mapped["amount"])
+        return False
+
+    # Currency must be a known 3-letter code.
+    # currency_short is filled by map_local_to_gemini_format via Excel/manual
+    # fallback, so if it is still invalid here both the extractor AND the Excel
+    # row had no usable currency — Gemini is the only option.
+    curr = str(mapped.get("currency_short", "") or "").strip().upper()
+    if len(curr) != 3 or curr not in _VALID_CURRENCIES:
+        logger.debug("local_completeness_fail invalid_currency=%s", curr)
+        return False
+
+    # Country must NOT still be a bare 2-letter ISO code (expansion failed)
+    country = str(mapped.get("beneficiary_country_text", "") or "").strip()
+    if re.match(r"^[A-Z]{2}$", country.upper()) and country.upper() not in {"US", "UK"}:
+        logger.debug("local_completeness_fail unexpanded_country=%s", country)
+        return False
+
+    # Beneficiary country must not be India (would swap remitter/beneficiary)
+    if "india" in country.lower():
+        logger.debug("local_completeness_fail beneficiary_is_india")
+        return False
+
+    # Beneficiary name/address must not contain "India" — catches cases where
+    # the extractor grabbed the ship-to/India address block as the beneficiary
+    bene_name = str(mapped.get("beneficiary_name", "") or "").strip()
+    bene_addr = str(mapped.get("beneficiary_address", "") or "").strip()
+    if "india" in bene_name.lower() or "india" in bene_addr.lower():
+        logger.debug("local_completeness_fail india_in_beneficiary_name_or_address")
+        return False
+
+    # Beneficiary name too long — almost certainly grabbed an address block
+    if len(bene_name) > 200:
+        logger.debug("local_completeness_fail beneficiary_name_too_long len=%d", len(bene_name))
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Field mapping: extractor.py keys → Gemini output format
+# ---------------------------------------------------------------------------
+
+def map_local_to_gemini_format(
+    raw_fields: Dict,
+    raw_text: str,
+    excel_data: Optional[Dict] = None,
+) -> Dict:
+    """
+    Convert the dict returned by any bosch_* extractor into the exact dict
+    format returned by invoice_gemini_extractor.extract_invoice_core_fields().
+
+    Key differences handled here:
+      beneficiary_country  → beneficiary_country_text  (+ ISO-2 expansion)
+      remitter_country     → remitter_country_text      (+ ISO-2 expansion)
+      invoice_date         → invoice_date_raw / invoice_date_iso / invoice_date_display
+      currency             → currency_short
+      amount_foreign       → amount                     (commas stripped)
+
+    Fields left blank (classifier fills them from _raw_invoice_text):
+      nature_of_remittance, purpose_group, purpose_code
+    """
+    if excel_data is None:
+        excel_data = {}
+
+    # Date
+    date_raw_str = str(raw_fields.get("invoice_date", "") or "").strip()
+    date_raw, date_iso, date_display = _normalize_date(date_raw_str)
+
+    # Amount
+    amount_clean = _clean_amount(str(raw_fields.get("amount_foreign", "") or ""))
+
+    # Currency: use extractor's value; fall back to Excel/manual selection when missing
+    currency = str(raw_fields.get("currency", "") or "").strip().upper()
+    if not currency:
+        currency = str(
+            excel_data.get("currency") or excel_data.get("currency_short") or ""
+        ).strip().upper()
+        if currency:
+            logger.debug("currency_fallback_from_excel currency=%s", currency)
+
+    # Countries
+    bene_country = _expand_country(str(raw_fields.get("beneficiary_country", "") or "").strip())
+    remi_country = _expand_country(str(raw_fields.get("remitter_country", "") or "").strip())
+    # Remitter country: default to India when extractor found nothing
+    if not remi_country:
+        remi_country = "India"
+        logger.debug("remitter_country_defaulted_to_india")
+
+    # Excel "Text" column (used by text_remittance_ai_helper classifier)
+    excel_text = str(
+        excel_data.get("Text") or excel_data.get("text") or ""
+    ).strip()
+
+    return {
+        # ── Core invoice fields ───────────────────────────────────────────
+        "remitter_name":              str(raw_fields.get("remitter_name", "") or "").strip(),
+        "remitter_address":           str(raw_fields.get("remitter_address", "") or "").strip(),
+        "remitter_country_text":      remi_country,
+        "beneficiary_name":           str(raw_fields.get("beneficiary_name", "") or "").strip(),
+        "beneficiary_address":        str(raw_fields.get("beneficiary_address", "") or "").strip(),
+        "beneficiary_country_text":   bene_country,
+        "invoice_number":             str(raw_fields.get("invoice_number", "") or "").strip(),
+        "invoice_date_raw":           date_raw,
+        "invoice_date_iso":           date_iso,
+        "invoice_date_display":       date_display,
+        "amount":                     amount_clean,
+        "currency_short":             currency,
+        # ── Classification (filled by remittance_classifier from _raw_invoice_text) ──
+        "nature_of_remittance":       "",
+        "purpose_group":              "",
+        "purpose_code":               "",
+        # ── Classifier inputs ─────────────────────────────────────────────
+        "_excel_text":                excel_text,
+        "_raw_invoice_text":          raw_text,
+        # ── Metadata ─────────────────────────────────────────────────────
+        "amount_source":              "local_extractor",
+        "requires_review_ai":         False,
+        "_extraction_quality":        "",
+        "_deterministic_amount_page": "",
+        "line_items":                 [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def try_local_extraction_from_bytes(
+    file_bytes: bytes,
+) -> Tuple[Optional[Dict], str, str]:
+    """
+    Attempt deterministic (no-Gemini) extraction from raw PDF bytes.
+
+    Returns
+    -------
+    (raw_fields, template_type, raw_text)
+
+    raw_fields   : dict with extractor.py snake_case keys, or None on any failure
+    template_type: one of bosch_vietnam / bosch_germany / bosch_sap /
+                   bosch_sap_de / generic
+    raw_text     : full extracted text (used as _raw_invoice_text for classifier)
+
+    Caller should treat raw_fields=None or template_type="generic" as
+    "fall through to Gemini".
+    """
+    if not _extractor_imported:
+        logger.warning("local_extractor_unavailable — falling back to Gemini")
+        return None, "generic", ""
+
+    tmp_path: Optional[str] = None
+    try:
+        # extractor.py requires a file path, not bytes — write to temp file
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        # Extract text layer (with OCR fallback for scanned PDFs)
+        text, words = extract_pdf_data_with_ocr_fallback(tmp_path)
+        text = remove_hex_strings(text)
+
+        if not text or len(text.strip()) < 50:
+            logger.info(
+                "local_extractor_text_too_short chars=%d — Gemini image path will run",
+                len(text.strip()) if text else 0,
+            )
+            return None, "generic", text or ""
+
+        # Identify the invoice template
+        template_type: str = detect_template(text)
+        logger.info("local_extractor_template=%s", template_type)
+
+        if template_type == "generic":
+            # generic extractor is minimal and unreliable — always use Gemini
+            return None, "generic", text
+
+        # Run the appropriate extractor
+        if template_type == "bosch_vietnam":
+            raw_fields = bosch_vietnam.extract(text, words)
+        elif template_type == "bosch_germany":
+            raw_fields = bosch_germany.extract(text, words)
+        elif template_type == "bosch_sap_de":
+            raw_fields = bosch_sap_de.extract(text, words)
+        elif template_type == "bosch_sap":
+            raw_fields = bosch_sap.extract(text, words)
+        else:
+            return None, "generic", text
+
+        return raw_fields, template_type, text
+
+    except Exception as exc:
+        logger.warning(
+            "local_extractor_exception type=%s msg=%s — falling back to Gemini",
+            type(exc).__name__,
+            exc,
+        )
+        return None, "generic", ""
+
+    finally:
+        # Always remove the temp file even if an exception occurred
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass  # Non-fatal; OS temp-file cleanup will handle it eventually

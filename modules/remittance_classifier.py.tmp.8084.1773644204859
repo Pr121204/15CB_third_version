@@ -352,13 +352,8 @@ HIGH_SIGNAL_RULES: List[HighSignalRule] = [
      "patterns": [r"\boff-?site\s+software\b", r"\bsoftware\s+purchase\b", r"\bdownload\s+software\b", r"\blicen[cs]e\s+key\b"]},
     {"purpose_code": "S0902", "nature_code": "16.54", "weight": 60,
      "patterns": [r"\bsaas\b", r"\bsubscription\b", r"\baccess\s+fee\b", r"\bper\s+seat\b", r"\bper\s+user\b"]},
-    {"purpose_code": "S0902", "nature_code": "16.52", "weight": 65,
-     "patterns": [
-         r"\bsoftware\s+licen[cs]e(s)?\b", r"\bsoftware\s+licen[cs]es\b", r"\blicen[cs]ing\b",
-         r"\bentitlement\b",       # SAP cloud licensing term for subscription-based products
-         r"\btenants?\b",          # SAP cloud billing unit (e.g. "1 ST (Tenants)")
-         r"\bcloud\s+tdd\b",       # SAP "Cloud Test, Demo and Development" license tier
-     ]},
+    {"purpose_code": "S0902", "nature_code": "16.52", "weight": 55,
+     "patterns": [r"\bsoftware\s+licen[cs]e(s)?\b", r"\bsoftware\s+licen[cs]es\b", r"\blicen[cs]ing\b"]},
     {"purpose_code": "S0902", "nature_code": "16.48", "weight": 80,
      "patterns": [r"\broyalty\b"]},
 

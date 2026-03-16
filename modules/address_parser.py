@@ -398,12 +398,16 @@ def parse_beneficiary_address(address_str: str) -> Dict[str, str]:
         raw_parts = [r for r, s in zip(raw_parts, parts) if s]
         parts = [p for p in parts if p]
 
-        # If the first part contains no digits but another part does, the first
-        # part is likely a company / entity name that Gemini bundled into the
-        # address field.  Skip it so it does not occupy FlatDoorBuilding.
+        # If the first part contains no digits (in the ORIGINAL, pre-ZIP-strip
+        # form) but another part does, the first part is likely a company /
+        # entity name that Gemini bundled into the address field.  Skip it so
+        # it does not occupy FlatDoorBuilding.
+        # NOTE: we check raw_parts[0] (before ZIP stripping) so that a
+        # "ZIP City" chunk like "H-1103 Budapest" — whose digits are removed by
+        # _strip_zips — is NOT mistakenly treated as a company name.
         if (
             len(parts) >= 2
-            and not re.search(r"\d", parts[0])
+            and not re.search(r"\d", raw_parts[0])
             and any(re.search(r"\d", p) for p in parts[1:])
         ):
             parts = parts[1:]
@@ -435,8 +439,19 @@ def parse_beneficiary_address(address_str: str) -> Dict[str, str]:
                 else:
                     result["FlatDoorBuilding"] = parts[0]
         elif len(parts) == 2:
-            result["FlatDoorBuilding"] = parts[0]
-            result["TownCityDistrict"] = parts[1]
+            p0_has_digit = bool(re.search(r"\d", parts[0]))
+            p1_has_digit = bool(re.search(r"\d", parts[1]))
+            if not p0_has_digit and p1_has_digit:
+                # Reversed "ZIP City, Street Number" format (common in Hungary,
+                # Germany, etc.).  parts[0] is the city (ZIP already stripped);
+                # parts[1] is the street + house number.
+                # Strip any residual country-prefix like "H-", "D-", "A-".
+                city_text = re.sub(r"^[A-Z]{1,2}-\s*", "", parts[0]).strip(" ,")
+                result["FlatDoorBuilding"] = parts[1]
+                result["TownCityDistrict"] = city_text or parts[0]
+            else:
+                result["FlatDoorBuilding"] = parts[0]
+                result["TownCityDistrict"] = parts[1]
         else:
             result["FlatDoorBuilding"] = parts[0]
             result["TownCityDistrict"] = parts[-1]

@@ -1,11 +1,35 @@
 import pdfplumber
-from utils.ocr_utils import ocr_pdf
+
+# Minimum characters per page before OCR fallback is triggered.
+# A vector-path PDF yields only the title text (e.g. "Bosch Corporation\nInvoice" = ~25 chars).
+# A real text PDF yields hundreds of chars per page.
+_OCR_THRESHOLD = 200
+
+
+def _ocr_pdf(pdf_path):
+    """Render pages as images and run Tesseract OCR. Returns (text, [])."""
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+        import os
+        tess_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(tess_path):
+            pytesseract.pytesseract.tesseract_cmd = tess_path
+    except ImportError:
+        return "", []
+
+    pages = convert_from_path(pdf_path, dpi=200)
+    text = ""
+    for page_img in pages:
+        page_text = pytesseract.image_to_string(page_img)
+        if page_text:
+            text += page_text + "\n"
+    return text, []
+
 
 def extract_pdf_data(pdf_path):
     text = ""
     words = []
-    
-    # 1. Try extracting text and words using pdfplumber
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             t = page.extract_text()
@@ -16,14 +40,20 @@ def extract_pdf_data(pdf_path):
                 y_tolerance=2,
                 keep_blank_chars=False
             ))
-            
-    # 2. Fallback to OCR if text layer is missing or too small
-    if not text or len(text.strip()) < 10:
-        print("OCR fallback triggered")
-        text = ocr_pdf(pdf_path)
-        
+
     return text, words
 
+
+def extract_pdf_data_with_ocr_fallback(pdf_path, min_chars=_OCR_THRESHOLD):
+    text, words = extract_pdf_data(pdf_path)
+    if len(text.strip()) >= min_chars:
+        return text, words   # normal path, no OCR needed
+    
+    # Fallback: OCR
+    print("OCR fallback triggered")
+    return _ocr_pdf(pdf_path)
+
+
 def extract_text(pdf_path):
-    text, _ = extract_pdf_data(pdf_path)
+    text, _ = extract_pdf_data_with_ocr_fallback(pdf_path)
     return text

@@ -251,6 +251,14 @@ def _effective_it_rate(inv: Dict[str, Any]) -> float:
     return float(_get_current_state()["global_controls"].get("it_act_rate", IT_ACT_RATE_DEFAULT))
 
 
+def _effective_non_tds_rate_mode(inv: Dict[str, Any]) -> str:
+    """Resolve the effective calculation basis (dtaa / it_act_2080) for an invoice."""
+    override = inv.get("non_tds_rate_mode_override")
+    if override is not None:
+        return str(override)
+    return _get_current_state()["global_controls"].get("non_tds_rate_mode", "dtaa")
+
+
 def _compute_config_sig(inv: Dict[str, Any]) -> tuple:
     """Signature of config inputs that affect state rebuild from extracted data.
 
@@ -273,6 +281,7 @@ def _compute_config_sig(inv: Dict[str, Any]) -> tuple:
         _effective_mode(inv),
         bool(_effective_gross(inv)),
         float(_effective_it_rate(inv)),
+        _effective_non_tds_rate_mode(inv),
         currency,
         fx,
         dedn,
@@ -296,7 +305,7 @@ def _rebuild_state_from_extracted(inv_id: str, inv: Dict[str, Any]) -> None:
         "is_gross_up": _effective_gross(inv),
         "tds_deduction_date": _get_invoice_dedn_date(inv),  # Posting Date -> DednDateTds
         "it_act_rate": _effective_it_rate(inv),
-        "non_tds_rate_mode": _get_current_state()["global_controls"].get("non_tds_rate_mode", "dtaa"),
+        "non_tds_rate_mode": _effective_non_tds_rate_mode(inv),
     }
 
     state = build_invoice_state(inv_id, inv["file_name"], inv["extracted"], config)
@@ -316,23 +325,16 @@ def _rebuild_state_from_extracted(inv_id: str, inv: Dict[str, Any]) -> None:
 def _reset_invoice_states() -> None:
     """Recompute invoices after a global change, preserving per-invoice overrides.
 
-    When the user toggles the global mode, gross-up or IT Act rate controls
-    we recompute derived state from existing extracted data.  Per-invoice
-    mode and gross-up overrides are intentionally preserved so that
-    individual invoice customisations survive global changes.  Only the
-    IT Act rate override is cleared because there is no per-invoice IT
-    rate UI yet.  No Gemini calls occur during this function.
+    When the user toggles the global mode, gross-up, IT Act rate or calculation
+    basis controls we recompute derived state from existing extracted data.
+    All per-invoice overrides (mode, gross, it_act_rate, non_tds_rate_mode) are
+    intentionally preserved so that individual invoice customisations survive
+    global changes.  No Gemini calls occur during this function.
     """
     state_ref = _get_current_state()
     logger.info("reset_invoice_states_started mode=%s", st.session_state.get("mode"))
     invoices = state_ref["invoices"]
     for inv_id, inv in invoices.items():
-        # Per-invoice mode_override and gross_override are intentionally
-        # preserved so that individual invoice customisations survive
-        # global changes.  IT Act rate override is cleared because there
-        # is no per-invoice IT Act rate UI yet.
-        inv["it_act_rate_override"] = None
-
         if inv.get("extracted"):
             # memoized rebuild: only rebuild if config signature changed
             new_sig = _compute_config_sig(inv)
@@ -525,7 +527,63 @@ def _apply_safe_deterministic_amount_override(
 def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name: str, config: dict) -> None:
     try:
         extracted: Dict[str, Any] = {}
+        _use_local = False
+
+        # ── Local extraction (no Gemini) for known Bosch templates ───────────
+        # Tries fast, deterministic regex/PDF extraction via extractor.py.
+        # If all critical fields are found the Gemini API call and the OCR
+        # amount-override step are both skipped entirely.
+        # Falls back to the Gemini path when: template is unrecognised,
+        # any critical field is missing or invalid, or an exception occurs.
         if file_name.lower().endswith(".pdf"):
+            try:
+                from modules.local_invoice_extractor import (
+                    try_local_extraction_from_bytes,
+                    check_local_completeness,
+                    map_local_to_gemini_format,
+                )
+                _local_raw, _template_type, _local_text = try_local_extraction_from_bytes(file_bytes)
+                if _local_raw is None and _template_type == "generic":
+                    logger.info(
+                        "local_extraction_skipped invoice_id=%s reason=no_template_or_short_text"
+                        " — falling back to Gemini",
+                        inv_id,
+                    )
+                if _local_raw is not None and _template_type != "generic":
+                    _candidate = map_local_to_gemini_format(
+                        _local_raw, _local_text, inv.get("excel", {})
+                    )
+                    if check_local_completeness(_candidate):
+                        extracted = _candidate
+                        _use_local = True
+                        logger.info(
+                            "local_extraction_success invoice_id=%s template=%s "
+                            "beneficiary=%r amount=%s currency=%s date_iso=%s",
+                            inv_id, _template_type,
+                            extracted.get("beneficiary_name"),
+                            extracted.get("amount"),
+                            extracted.get("currency_short"),
+                            extracted.get("invoice_date_iso"),
+                        )
+                    else:
+                        logger.info(
+                            "local_extraction_incomplete invoice_id=%s template=%s "
+                            "— falling back to Gemini",
+                            inv_id, _template_type,
+                        )
+            except Exception as _local_exc:
+                logger.warning(
+                    "local_extraction_error invoice_id=%s error=%s "
+                    "— falling back to Gemini",
+                    inv_id, _local_exc,
+                )
+
+        if _use_local:
+            logger.info(
+                "GEMINI_SKIPPED invoice_id=%s template=%s — local extraction used, Gemini not called",
+                inv_id, _template_type,
+            )
+        elif file_name.lower().endswith(".pdf"):
             try:
                 _pt = extract_text_from_pdf(io.BytesIO(file_bytes), return_pages=True)
                 pages_text: List[str] = list(_pt) if isinstance(_pt, list) else []
@@ -545,6 +603,7 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                 route_mode,
             )
             if route_mode == "text":
+                logger.info("GEMINI_CALLED invoice_id=%s route=pdf_text", inv_id)
                 extracted = extract_invoice_core_fields(text, invoice_id=inv_id, excel_data=inv.get("excel", {}))
                 extracted["_raw_invoice_text"] = text
                 _apply_safe_deterministic_amount_override(
@@ -578,6 +637,7 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                         page_image_bytes_list: List[bytes] = list(pool.map(_encode_page_jpeg, selected_pages))
 
                     from modules.invoice_gemini_extractor import extract_invoice_core_fields_from_multi_images
+                    logger.info("GEMINI_CALLED invoice_id=%s route=pdf_image_multi pages=%d", inv_id, len(page_image_bytes_list))
                     extracted = extract_invoice_core_fields_from_multi_images(
                         page_image_bytes_list, 
                         invoice_id=inv_id, 
@@ -613,6 +673,7 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                             "ocr_text_fallback_start invoice_id=%s ocr_text_len=%s",
                             inv_id, len(raw_text.strip()),
                         )
+                        logger.info("GEMINI_CALLED invoice_id=%s route=ocr_text_fallback", inv_id)
                         ocr_extracted = extract_invoice_core_fields(
                             raw_text, invoice_id=inv_id, excel_data=inv.get("excel", {})
                         )
@@ -648,6 +709,7 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                     )
                 else:
                     # Final fallback: treat as plain image
+                    logger.info("GEMINI_CALLED invoice_id=%s route=pdf_image_single_fallback", inv_id)
                     try:
                         extracted = extract_invoice_core_fields_from_image(file_bytes, invoice_id=inv_id, excel_data=inv.get("excel", {}))
                         text = extract_text_from_image_file(file_bytes) or ""
@@ -659,6 +721,7 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                         extracted["_raw_invoice_text"] = text
         else:
             # Image uploads (jpg/png)
+            logger.info("GEMINI_CALLED invoice_id=%s route=image_upload", inv_id)
             extracted = extract_invoice_core_fields_from_image(file_bytes, invoice_id=inv_id, excel_data=inv.get("excel", {}))
             try:
                 raw_text = extract_text_from_image_file(file_bytes) or ""
@@ -832,6 +895,7 @@ def render_bulk_invoice_page() -> None:
                     inv["mode_override"] = None
                     inv["gross_override"] = None
                     inv["it_act_rate_override"] = None
+                    inv["non_tds_rate_mode_override"] = None
                     inv["config_sig"] = None
 
                 state["zip_context"] = {
@@ -1171,6 +1235,8 @@ def render_bulk_invoice_page() -> None:
                 with st.container(border=True):
                     global_mode = state["global_controls"]["mode"]
                     global_gross = state["global_controls"]["gross_up"]
+                    global_it_rate = state["global_controls"].get("it_act_rate", IT_ACT_RATE_DEFAULT)
+                    global_non_tds_rate_mode = state["global_controls"].get("non_tds_rate_mode", "dtaa")
                     epoch = state.get("ui_epoch", 0)
                     gross_key = f"ov_gross_{inv_id}_{epoch}"
                     last_mode_key = f"ov_last_mode_{inv_id}_{epoch}"
@@ -1187,8 +1253,10 @@ def render_bulk_invoice_page() -> None:
                     # Use effective values so radio/checkbox reflect existing overrides
                     effective_mode_val = _effective_mode(inv)
                     effective_gross_val = _effective_gross(inv)
+                    effective_it_rate_val = _effective_it_rate(inv)
+                    effective_non_tds_rate_mode_val = _effective_non_tds_rate_mode(inv)
 
-                    ov_c1, ov_c2 = st.columns(2)
+                    ov_c1, ov_c2, ov_c3, ov_c4 = st.columns(4)
                     with ov_c1:
                         selected_mode = st.radio(
                             "Tax Mode",
@@ -1224,16 +1292,56 @@ def render_bulk_invoice_page() -> None:
                             key=gross_key,
                         )
 
+                    # IT Act Rate selectbox (per-invoice)
+                    _ov_it_rate_labels = [
+                        f"{r}% (Default)" if r == IT_ACT_RATE_DEFAULT else f"{r}%"
+                        for r in IT_ACT_RATES
+                    ]
+                    _ov_it_rate_map = dict(zip(_ov_it_rate_labels, IT_ACT_RATES))
+                    _ov_it_prev_label = next(
+                        (lbl for lbl, val in _ov_it_rate_map.items() if val == effective_it_rate_val),
+                        _ov_it_rate_labels[0],
+                    )
+                    with ov_c3:
+                        _ov_it_label = st.selectbox(
+                            "IT Act Rate (%)",
+                            options=_ov_it_rate_labels,
+                            index=_ov_it_rate_labels.index(_ov_it_prev_label),
+                            key=f"ov_it_rate_{inv_id}_{epoch}",
+                        )
+                        selected_it_rate = _ov_it_rate_map.get(_ov_it_label, IT_ACT_RATE_DEFAULT)
+
+                    # Calculation basis toggle (per-invoice)
+                    with ov_c4:
+                        _ov_toggle_checked = effective_non_tds_rate_mode_val == "it_act_2080"
+                        st.markdown(
+                            "<p style='margin:0 0 2px 0;font-size:0.80rem;color:#555;"
+                            "font-weight:600;'>Calculation basis</p>",
+                            unsafe_allow_html=True,
+                        )
+                        _ov_toggle_on = st.toggle(
+                            "20.80% (IT Act)",
+                            value=_ov_toggle_checked,
+                            key=f"ov_non_tds_rate_{inv_id}_{epoch}",
+                            help="OFF → DTAA treaty rate (default)   |   ON → 20.80% IT Act rate",
+                        )
+                        selected_non_tds_rate_mode = "it_act_2080" if _ov_toggle_on else "dtaa"
+                        _ov_basis_name = "20.80% (IT Act)" if _ov_toggle_on else "DTAA Rate"
+                        st.markdown(
+                            f"<p style='margin:2px 0 0 0;font-size:0.78rem;color:#888;'>{_ov_basis_name}</p>",
+                            unsafe_allow_html=True,
+                        )
+
                     # Write overrides (None = inherit global)
                     new_mode_override = selected_mode if selected_mode != global_mode else None
                     if new_mode_override != inv.get("mode_override"):
                         inv["mode_override"] = new_mode_override
-                    
+
                     if selected_mode == MODE_NON_TDS:
                         new_gross_override = None  # forced off
                     else:
                         new_gross_override = selected_gross if selected_gross != global_gross else None
-                        
+
                     if new_gross_override != inv.get("gross_override"):
                         inv["gross_override"] = new_gross_override
                         # --- SOFT REBUILD FOR GROSS UP ---
@@ -1241,6 +1349,19 @@ def render_bulk_invoice_page() -> None:
                             inv["state"]["meta"]["is_gross_up"] = selected_gross
                             inv["state"] = recompute_invoice(inv["state"])
                             inv["config_sig"] = _compute_config_sig(inv)
+
+                    # IT Act Rate and Calculation basis overrides — full rebuild needed
+                    new_it_rate_override = selected_it_rate if selected_it_rate != global_it_rate else None
+                    new_rate_mode_override = selected_non_tds_rate_mode if selected_non_tds_rate_mode != global_non_tds_rate_mode else None
+
+                    _it_rate_changed = (new_it_rate_override != inv.get("it_act_rate_override"))
+                    _rate_mode_changed = (new_rate_mode_override != inv.get("non_tds_rate_mode_override"))
+
+                    inv["it_act_rate_override"] = new_it_rate_override
+                    inv["non_tds_rate_mode_override"] = new_rate_mode_override
+
+                    if (_it_rate_changed or _rate_mode_changed) and inv.get("status") == "processed" and inv.get("extracted"):
+                        _rebuild_state_from_extracted(inv_id, inv)
 
                 # Buttons for processing and XML generation
                 bc1, bc2, bc3 = st.columns([2, 2, 2])

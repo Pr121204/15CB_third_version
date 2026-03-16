@@ -265,6 +265,7 @@ def build_invoice_registry(df: pd.DataFrame, invoice_files: Iterable[Tuple[str, 
             "mode_override": None,
             "gross_override": None,
             "it_act_rate_override": None,
+            "non_tds_rate_mode_override": None,
             # Memoization
             "config_sig": None,
             # Processing artifacts

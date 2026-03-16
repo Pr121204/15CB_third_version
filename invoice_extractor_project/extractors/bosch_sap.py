@@ -10,6 +10,7 @@ These have:
   - "Bill to Party Address" block for remitter info
 """
 import re
+from text_utils import detect_country
 
 _COUNTRY_MAP = {
     "DE": "Germany", "FR": "France", "GB": "UK", "NL": "Netherlands",
@@ -126,7 +127,7 @@ def extract(text, words=None):
         data["beneficiary_address"] = ""
 
     # ── Remitter name ─────────────────────────────────────────────────────────
-    data["remitter_country"] = "India"
+    # data["remitter_country"] = "India"  # Replaced by dynamic detection in address step
     m_name = re.search(r"Bosch\s*Ltd\.", text, re.IGNORECASE)
     data["remitter_name"] = "Bosch Ltd." if m_name else ""
 
@@ -217,6 +218,7 @@ def extract(text, words=None):
             remitter_addr = f"{street}, {city} - {pincode}"
 
     data["remitter_address"] = remitter_addr
+    data["remitter_country"] = detect_country(remitter_addr, default="India")
 
     # ── Invoice number: "Billing Document XXXXXXXXX" ─────────────────────────
     m_inv = re.search(

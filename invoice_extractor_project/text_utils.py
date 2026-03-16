@@ -70,7 +70,8 @@ def clean_value(v):
 def remove_hex(text):
     if not text:
         return ""
-    return re.sub(r"\b[A-F0-9]{20,}\b", "", text)
+    # Include 'O' as it's a common OCR error for '0' in hex IDs
+    return re.sub(r"\b[A-F0-9O]{16,}\b", "", text)
 
 def validate_amount(v):
     if not v:
@@ -87,3 +88,26 @@ def remove_hex_strings(text):
             continue
         lines.append(l)
     return "\n".join(lines)
+
+def detect_country(text, default="India"):
+    if not text:
+        return default
+    
+    # Keywords and mappings
+    keywords = [
+        (r"\bINDIA\b|\bINDIEN\b", "India"),
+        (r"\bVIETNAM\b|\bVIET\s*NAM\b", "Vietnam"),
+        (r"\bGERMANY\b|\bDEUTSCHLAND\b|\bSTUTTGART\b", "Germany"),
+        (r"\bJAPAN\b|\bKANAGAWA\b", "Japan"),
+        (r"\bFRANCE\b", "France"),
+        (r"\bCZECH\b|\bČESKÁ\b", "Czech Republic"),
+        (r"\bHUNGARY\b|\bMAGYARORSZÁG\b|\bBUDAPEST\b", "Hungary"),
+        (r"\bKOREA\b", "Korea"),
+        (r"\bTHAILAND\b", "Thailand"),
+    ]
+    
+    for pattern, country in keywords:
+        if re.search(pattern, text, re.IGNORECASE):
+            return country
+            
+    return default
