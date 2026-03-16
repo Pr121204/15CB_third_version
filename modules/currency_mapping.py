@@ -16,8 +16,12 @@ CONFIRMED_SHORT_CODE_TO_CODE: Dict[str, str] = {
     "JPY": "78",
 }
 
-# Short-code targets must match exact currency names from master JSON.
+# Short-code targets must match exact currency names from master JSON
+# (data/master/currency_codes.json).  Every currency in _VALID_CURRENCIES
+# (local_invoice_extractor.py) must appear here so that resolve_currency_selection()
+# can map the 3-letter code to a numeric form code.
 SHORT_CODE_TARGET_NAME: Dict[str, str] = {
+    # Already confirmed in production
     "EUR": "EURO",
     "USD": "US DOLLAR",
     "GBP": "POUND STERLING",
@@ -31,6 +35,25 @@ SHORT_CODE_TARGET_NAME: Dict[str, str] = {
     "NOK": "NORWEGIAN KRONES",
     "DKK": "DANISH KRONE",
     "NZD": "NEW ZEALAND DOLLAR",
+    # Additional currencies from Bosch invoices (verified against currency_codes.json)
+    "AED": "UAE DIRHAM",
+    "BDT": "BANGLADESH TAKA",
+    "BRL": "BRAZILIAN REAL",
+    "CZK": "KORUNA",
+    "HKD": "HONGKONG DOLLAR",
+    "HUF": "HUNGARIAN FORINT",
+    "IDR": "INDONESIAN RUPIAH",
+    "KRW": "SOUTH KOREAN WON",
+    "MXN": "MEXICAN PESO",
+    "MYR": "MALAYSIAN RINGGIT",
+    "PHP": "PHILLIPINES PESOS",
+    "PLN": "POLISH ZLOTY",
+    "RON": "ROMANIAN LEU",
+    "THB": "THAI BAHTS",
+    "TWD": "NEW TAIWAN DOLLAR",
+    "UAH": "HRYVNIA",
+    "VND": "VIETNAM DONG",
+    "ZAR": "RAND",
 }
 
 

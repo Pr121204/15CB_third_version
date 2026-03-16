@@ -338,7 +338,7 @@ def map_local_to_gemini_format(
             excel_data.get("currency") or excel_data.get("currency_short") or ""
         ).strip().upper()
         if currency:
-            logger.debug("currency_fallback_from_excel currency=%s", currency)
+            logger.info("currency_fallback_from_excel currency=%s — extractor missed it, using Excel/manual value", currency)
 
     # Countries
     bene_country = _expand_country(str(raw_fields.get("beneficiary_country", "") or "").strip())

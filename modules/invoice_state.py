@@ -522,6 +522,9 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
 
     form["AmtPayForgnRem"] = extracted.get("amount", "")
     form["CurrencySecbCode"] = resolved_currency.get("code", "")
+    # Preserve the raw 3-letter short code so form_ui can show a "select manually"
+    # warning if the numeric code could not be resolved (e.g. unknown currency).
+    form["_currency_short_code"] = source_short
     form["RemitteeZipCode"] = "999999"
     form["RemitteeState"] = "OUTSIDE INDIA"
     # Seed user-selectable IT Act rate (from config override or default)
