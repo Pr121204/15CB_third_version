@@ -517,7 +517,10 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
     form["NameRemitteeInput"] = cleaned_beneficiary_name
     form["NameRemittee"] = cleaned_beneficiary_name
     form["RemitterAddress"] = str(extracted.get("remitter_address") or "").strip()
-    form["InvoiceNumber"] = str(extracted.get("invoice_number") or "").strip()
+    # For the special EUR Excel format the invoice number is supplied directly
+    # in the "Invoice No" column; use it in preference to the AI-extracted value.
+    excel_invoice_no = str(config.get("excel_invoice_no") or "").strip()
+    form["InvoiceNumber"] = excel_invoice_no or str(extracted.get("invoice_number") or "").strip()
     form["InvoiceDate"] = str(extracted.get("invoice_date_iso") or "").strip()
 
     form["AmtPayForgnRem"] = extracted.get("amount", "")

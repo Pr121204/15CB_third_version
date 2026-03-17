@@ -654,7 +654,7 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         # that both PAN lookup and the XML NameRemitter field receive the pure entity
         # name.  The address is displayed separately in the remitter address widget.
         if f"{invoice_id}_header_remitter_name" not in st.session_state:
-            st.session_state[f"{invoice_id}_header_remitter_name"] = raw_remitter
+            st.session_state[f"{invoice_id}_header_remitter_name"] = display_remitter
         new_remitter = st.text_input(
             "Name of the Remitter",
             key=f"{invoice_id}_header_remitter_name",

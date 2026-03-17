@@ -93,7 +93,20 @@ def read_excel(excel_bytes: bytes) -> pd.DataFrame:
     Returns:
         A pandas ``DataFrame`` containing the Excel data.
     """
-    return pd.read_excel(BytesIO(excel_bytes), engine="openpyxl")
+    # Read without a header first so we can locate the actual header row.
+    # Some Excel exports have title/metadata rows above the real column headers.
+    raw = pd.read_excel(BytesIO(excel_bytes), engine="openpyxl", header=None)
+    header_row = 0  # default: first row is the header
+    # Known header sentinel values that appear in the old or special format.
+    _HEADER_SENTINELS = {"Reference", "Invoice No"}
+    for idx, row in raw.iterrows():
+        row_vals = {str(v).strip() for v in row.values if pd.notna(v)}
+        if row_vals & _HEADER_SENTINELS:
+            header_row = int(idx)
+            break
+    df = pd.read_excel(BytesIO(excel_bytes), engine="openpyxl", header=header_row)
+    df.columns = df.columns.str.strip()
+    return df
 
 
 
@@ -189,6 +202,25 @@ def _to_float(v) -> float:
         return 0.0
 
 
+# Columns that uniquely identify the special EUR format.
+_SPECIAL_FORMAT_COLS = {"Invoice No", "Exch. rate"}
+
+
+def _is_special_format(df: pd.DataFrame) -> bool:
+    """Return True if *df* uses the special EUR format.
+
+    Detection rules (old format always wins if in doubt):
+    1. The standard ``Reference`` column must be ABSENT — if it is present
+       the file is unconditionally treated as the old format regardless of
+       any other columns that happen to share names with the special format.
+    2. Both ``Invoice No`` and ``Exch. rate`` must be present.
+    """
+    cols = set(df.columns)
+    if "Reference" in cols:
+        return False  # old format takes priority
+    return _SPECIAL_FORMAT_COLS.issubset(cols)
+
+
 def build_invoice_registry(df: pd.DataFrame, invoice_files: Iterable[Tuple[str, bytes]]) -> Dict[str, Dict[str, object]]:
     """Constructs the initial invoice registry from the DataFrame and files.
 
@@ -213,21 +245,32 @@ def build_invoice_registry(df: pd.DataFrame, invoice_files: Iterable[Tuple[str, 
     invoices: Dict[str, Dict[str, object]] = {}
     if df is None:
         return invoices
-    
-    # Normalize and index rows by Reference
-    ref_to_rows: Dict[str, List[pd.Series]] = {}
+
+    # Build two independent lookup indexes:
+    #   ref_rows   — keyed by "Reference"  (standard format, takes priority)
+    #   inv_rows   — keyed by "Invoice No" (special EUR format, fallback only)
+    # We never rely on detecting the format upfront; instead we try the old
+    # format first for each file and only fall back to the special format when
+    # no standard "Reference" row matches.
+    ref_rows: Dict[str, List[pd.Series]] = {}
+    inv_rows: Dict[str, List[pd.Series]] = {}
     if not df.empty:
         for _, row in df.fillna("").iterrows():
-            raw_ref = row.get("Reference")
-            norm_ref = _normalize_reference(raw_ref)
-            if norm_ref:
-                ref_to_rows.setdefault(norm_ref, []).append(row)
+            r = _normalize_reference(row.get("Reference"))
+            if r:
+                ref_rows.setdefault(r, []).append(row)
+            n = _normalize_reference(row.get("Invoice No"))
+            if n:
+                inv_rows.setdefault(n, []).append(row)
 
     for filename, fbytes in invoice_files:
         stem = os.path.splitext(os.path.basename(filename))[0]
         norm_stem = _normalize_reference(stem)
-        row_list = ref_to_rows.get(norm_stem, [])
+
+        # Old format (Reference) takes priority; special format is fallback.
+        row_list = ref_rows.get(norm_stem) or inv_rows.get(norm_stem) or []
         row: pd.Series | None = row_list[0] if row_list else None
+
         # Derive values from row
         currency = ""
         fcy_amount = 0.0
@@ -235,14 +278,25 @@ def build_invoice_registry(df: pd.DataFrame, invoice_files: Iterable[Tuple[str, 
         exchange_rate = 0.0
         posting_raw = None
         dedn_date = ""
+        invoice_no = ""
         if row is not None:
-            currency = str(row.get("Document currency") or "").strip().upper()
-            if currency == "NAN":
-                currency = ""
-            fcy_amount = _to_float(row.get("Amount in doc. curr."))
-            inr_amount = _to_float(row.get("Amount in local currency"))
-            exchange_rate = abs(inr_amount / fcy_amount) if fcy_amount not in (0, 0.0) else 0.0
-            
+            if "Exch. rate" in row and "Amount in Eur" in row:
+                # Special EUR format: currency is always EUR, exchange rate
+                # is read directly from the "Exch. rate" column.
+                currency = "EUR"
+                fcy_amount = _to_float(row.get("Amount in Eur"))
+                inr_amount = _to_float(row.get("Amount in INR"))
+                exchange_rate = _to_float(row.get("Exch. rate"))
+                invoice_no = str(row.get("Invoice No") or "").strip()
+            else:
+                # Standard format: exchange rate is derived from amounts.
+                currency = str(row.get("Document currency") or "").strip().upper()
+                if currency == "NAN":
+                    currency = ""
+                fcy_amount = _to_float(row.get("Amount in doc. curr."))
+                inr_amount = _to_float(row.get("Amount in local currency"))
+                exchange_rate = abs(inr_amount / fcy_amount) if fcy_amount not in (0, 0.0) else 0.0
+
             # Use 'Posting Date' for 'Date of deduction of TDS' as per user request
             posting_raw = row.get("Posting Date")
             dedn_date = parse_excel_date(posting_raw)
@@ -260,6 +314,9 @@ def build_invoice_registry(df: pd.DataFrame, invoice_files: Iterable[Tuple[str, 
                 "exchange_rate": exchange_rate,
                 "posting_date_raw": posting_raw,
                 "dedn_date_tds": dedn_date,
+                # Non-empty only for the special EUR format; used to override
+                # the AI-extracted invoice number in invoice_state.py.
+                "invoice_no": invoice_no,
             },
             # Overrides (None means inherit global)
             "mode_override": None,
@@ -286,13 +343,28 @@ def _extract_excel_metadata(row: dict) -> Dict[str, object]:
 
     Mirrors the per-row extraction logic inside ``build_invoice_registry``.
     Used by the single-invoice re-upload flow in app.py.
+
+    Supports both the standard format (keyed by ``Document currency`` /
+    ``Amount in doc. curr.`` / ``Amount in local currency``) and the special
+    EUR format (keyed by ``Invoice No`` / ``Exch. rate`` / ``Amount in Eur``
+    / ``Amount in INR``).
     """
-    currency = str(row.get("Document currency") or "").strip().upper()
-    if currency == "NAN":
-        currency = ""
-    fcy_amount = _to_float(row.get("Amount in doc. curr."))
-    inr_amount = _to_float(row.get("Amount in local currency"))
-    exchange_rate = abs(inr_amount / fcy_amount) if fcy_amount not in (0, 0.0) else 0.0
+    invoice_no = ""
+    if "Invoice No" in row and "Exch. rate" in row:
+        # Special EUR format
+        currency = "EUR"
+        fcy_amount = _to_float(row.get("Amount in Eur"))
+        inr_amount = _to_float(row.get("Amount in INR"))
+        exchange_rate = _to_float(row.get("Exch. rate"))
+        invoice_no = str(row.get("Invoice No") or "").strip()
+    else:
+        # Standard format
+        currency = str(row.get("Document currency") or "").strip().upper()
+        if currency == "NAN":
+            currency = ""
+        fcy_amount = _to_float(row.get("Amount in doc. curr."))
+        inr_amount = _to_float(row.get("Amount in local currency"))
+        exchange_rate = abs(inr_amount / fcy_amount) if fcy_amount not in (0, 0.0) else 0.0
     posting_raw = row.get("Posting Date")
     dedn_date = parse_excel_date(posting_raw)
     return {
@@ -302,6 +374,7 @@ def _extract_excel_metadata(row: dict) -> Dict[str, object]:
         "exchange_rate": exchange_rate,
         "posting_date_raw": posting_raw,
         "dedn_date_tds": dedn_date,
+        "invoice_no": invoice_no,
     }
 
 

@@ -496,7 +496,7 @@ def classify_text_field(text: Optional[str],
         audit["steps"].append("TEXT_BLANK")
         if pdf_norm:
             audit["steps"].append("PDF_FALLBACK_ATTEMPT")
-            code_pdf, matched_pdf = rule_based_classify(pdf_norm, line_items)
+            code_pdf, matched_pdf = rule_based_classify(pdf_norm, [])
             if code_pdf:
                 audit["steps"].append(f"PDF_RULE_MATCH -> {code_pdf} via {matched_pdf}")
                 res = build_result(code_pdf, matched_pdf, "PDF_RULE", "MEDIUM", ["Fallback from PDF text"])
@@ -521,7 +521,7 @@ def classify_text_field(text: Optional[str],
         audit["steps"].append("TEXT_INSTRUCTIONAL")
         if pdf_norm:
             audit["steps"].append("PDF_FALLBACK_ATTEMPT")
-            code_pdf, matched_pdf = rule_based_classify(pdf_norm, line_items)
+            code_pdf, matched_pdf = rule_based_classify(pdf_norm, [])
             if code_pdf:
                 audit["steps"].append(f"PDF_RULE_MATCH -> {code_pdf} via {matched_pdf}")
                 res = build_result(code_pdf, matched_pdf, "PDF_RULE", "MEDIUM", ["Instructional text; used PDF fallback"])
@@ -541,7 +541,7 @@ def classify_text_field(text: Optional[str],
         return res
 
     # 3) Rule-based classification on text
-    code, matched = rule_based_classify(text_norm, line_items)
+    code, matched = rule_based_classify(text_norm, [])
     if code:
         source = "TEXT_RULE"
         if matched and matched[0] == "rd_rule":
@@ -564,7 +564,7 @@ def classify_text_field(text: Optional[str],
     # 5) PDF fallback
     if pdf_norm:
         audit["steps"].append("PDF_RULE_FALLBACK")
-        code_pdf, matched_pdf = rule_based_classify(pdf_norm, line_items)
+        code_pdf, matched_pdf = rule_based_classify(pdf_norm, [])
         if code_pdf:
             audit["steps"].append(f"PDF_RULE_MATCH -> {code_pdf} via {matched_pdf}")
             res = build_result(code_pdf, matched_pdf, "PDF_RULE", "MEDIUM", ["Fallback from PDF"])

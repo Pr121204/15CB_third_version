@@ -306,6 +306,7 @@ def _rebuild_state_from_extracted(inv_id: str, inv: Dict[str, Any]) -> None:
         "tds_deduction_date": _get_invoice_dedn_date(inv),  # Posting Date -> DednDateTds
         "it_act_rate": _effective_it_rate(inv),
         "non_tds_rate_mode": _effective_non_tds_rate_mode(inv),
+        "excel_invoice_no": str(ex.get("invoice_no") or "").strip(),
     }
 
     state = build_invoice_state(inv_id, inv["file_name"], inv["extracted"], config)
@@ -831,6 +832,7 @@ def _process_single_invoice(inv_id: str, *, wait: bool = False) -> None:
     except (TypeError, ValueError):
         config["exchange_rate"] = 0.0
     config["tds_deduction_date"] = _get_invoice_dedn_date(inv)
+    config["excel_invoice_no"] = str(ex.get("invoice_no") or "").strip()
 
     # Start the worker in a background thread to keep UI responsive
     t = threading.Thread(
@@ -1562,16 +1564,24 @@ def render_single_invoice_page() -> None:
                 df = read_excel(uploaded_excel.getvalue())
                 stem = os.path.splitext(uploaded_inv.name)[0]
                 norm_stem = _normalize_reference(stem)
-                
+
                 matches = 0
                 excel_row = {}
                 if not df.empty:
+                    # Try old format first (Reference column takes priority).
                     for _, row in df.fillna("").iterrows():
                         if _normalize_reference(row.get("Reference")) == norm_stem:
                             matches += 1
                             if matches == 1:
                                 excel_row = row.to_dict()
-                
+                    # Fall back to special EUR format (Invoice No column).
+                    if matches == 0:
+                        for _, row in df.fillna("").iterrows():
+                            if _normalize_reference(row.get("Invoice No")) == norm_stem:
+                                matches += 1
+                                if matches == 1:
+                                    excel_row = row.to_dict()
+
                 if matches == 0:
                     st.error(f"Could not find matching row in Excel for invoice reference: {stem}")
                     return

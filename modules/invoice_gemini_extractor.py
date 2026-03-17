@@ -425,9 +425,6 @@ Avoid generic terms like "invoice payment", "fees", or "professional charges".
 Purpose Code
 RBI remittance purpose code corresponding to the service (e.g., S0802, S0803, S1006).
 
-Purpose Group
-Higher-level category for the purpose code (e.g., Telecommunication, Computer & Information Services, Other Business Services).
-
 INVOICE NUMBER EXTRACTION POLICY
 For "invoice_number", extract the document reference number that uniquely identifies this invoice:
 - Preferred labels: "Invoice No.", "Invoice #", "Folio", "Serie / Folio", "Serie/Folio", "Folio Fiscal", "Billing Document", "Document No.", "Ref No."
@@ -440,7 +437,7 @@ You must determine Amount in Foreign Currency (FCY) using the following strict o
 1. Stage 1 — Invoice totals block (preferred): Search for "Amount Due", "Balance Due", "Grand Total", "Gross Value", "Net Value", "Total Payable" near the end of the invoice.
 2. Stage 2 — Invoice summary inference: If multiple totals exist, choose the final summary block.
 3. Stage 3 — Totals block interpretation: If totals are unclear, infer from subtotal/tax/net/gross values.
-4. Stage 4 — Excel fallback (LAST STAGE): If text does not provide a reliable amount, use the FCY amount from the Excel data provided. Set "amount_source": "excel_last_fallback" and "requires_review": true.
+4. Stage 4 — Excel fallback (LAST STAGE): If text does not provide a reliable amount, use the FCY amount from the Excel data provided. Set "requires_review": true.
 
 ADDRESS RULES
 Do not merge addresses from different parties. Each party must have its own exact address block.
@@ -460,9 +457,6 @@ For beneficiary_name:
 SERVICE CLASSIFICATION RULES
 Look for keywords in service descriptions, line items, and notes (e.g., software, consulting, cloud, subscription, database, technical support).
 
-CONFIDENCE RULE
-If the description is vague (e.g., "consulting services", "platform fee"), set "confidence": "LOW".
-
 OUTPUT FORMAT
 Return ONLY JSON.
 
@@ -479,18 +473,8 @@ Return ONLY JSON.
   "currency": "",
   "nature_of_remittance": "",
   "purpose_code": "",
-  "purpose_group": "",
-  "line_items": [
-    {"description": "Description of individual service or item", "amount": 0.0}
-  ],
-  "amount_source": "invoice_total | invoice_summary_block | excel_last_fallback",
-  "confidence": "HIGH | MEDIUM | LOW",
-  "requires_review": false,
-  "evidence_phrases": []
+  "requires_review": false
 }
-
-EVIDENCE REQUIREMENT
-Include evidence phrases from the text that justify the classification.
 
 FINAL TASK
 Analyze the following input.
@@ -557,12 +541,7 @@ Return valid JSON only with exactly this structure:
   "currency": "",
   "nature_of_remittance": "",
   "purpose_code": "",
-  "purpose_group": "",
-  "line_items": [],
-  "amount_source": "invoice_total",
-  "confidence": "HIGH",
-  "requires_review": false,
-  "evidence_phrases": []
+  "requires_review": false
 }}
 
 Excel data provided: {input_data}
@@ -586,14 +565,7 @@ Required JSON Structure:
   "currency": "",
   "nature_of_remittance": "",
   "purpose_code": "",
-  "purpose_group": "",
-  "line_items": [
-    {"description": "", "amount": 0.0}
-  ],
-  "amount_source": "",
-  "confidence": "",
-  "requires_review": false,
-  "evidence_phrases": []
+  "requires_review": false
 }
 Rules:
 1. Follow the 4-stage amount extraction policy (Invoice Total -> Summary Block -> Inference -> Excel fallback).
@@ -1078,20 +1050,23 @@ def _is_email_domain(text: str) -> bool:
 
 def _collapse_underscored_letter_tokens(text: str) -> str:
     """
-    Collapses tokens that look like single letters separated by underscores.
-    Example: "E_T_A__S _G_M_B_H_" -> "ETAS GMBH"
+    Collapses tokens that look like letter segments separated by underscores
+    (OCR artifact from underlined text in PDFs).
+    Examples:
+      "E_T_A__S _G_M_B_H_"      -> "ETAS GMBH"   (single-char segments)
+      "B_OR_S_IG_ST_RA_SS_E_"   -> "BORSIGSTRASSE" (multi-char segments)
     """
     if "_" not in text:
         return text
-    
+
     tokens = text.split()
     new_tokens = []
     for t in tokens:
         # Only act on tokens with underscores that are letters + underscores
         if "_" in t and re.fullmatch(r"[A-Za-z_]+", t):
             parts = [p for p in t.split("_") if p]
-            # If we have at least 2 parts and all are single characters, collapse them
-            if len(parts) >= 2 and all(len(p) == 1 for p in parts):
+            # Collapse both single-char and multi-char segments
+            if len(parts) >= 2:
                 new_tokens.append("".join(parts))
             else:
                 new_tokens.append(t)
@@ -1266,7 +1241,11 @@ def _is_valid_postal_address(address: str, beneficiary_name: str = "") -> bool:
 
 
 def _normalize_extracted_address(value: str) -> str:
-    return fix_concatenated_words(_normalize_extracted_text(str(value or ""))).upper()
+    # Strip underscore OCR artifacts caused by underlined text in scanned PDFs.
+    # Postal addresses never contain underscores in valid text; this covers
+    # mixed alphanumeric tokens like "2_4_", "_D_-7_0_4_69_", "_S_TU_TT_GA_R_T".
+    value = re.sub(r"_", "", str(value or ""))
+    return fix_concatenated_words(_normalize_extracted_text(value)).upper()
 
 
 def _detect_country_signals_from_text(text: str) -> str:
@@ -1876,7 +1855,6 @@ def merge_multi_page_image_extractions(page_results: List[Dict[str, str]]) -> Tu
         "amount": "",
         "currency_short": "",
         "nature_of_remittance": "",
-        "purpose_group": "",
         "purpose_code": "",
         "beneficiary_country_text": "",
         "remitter_country_text": "",
@@ -1913,7 +1891,6 @@ def merge_multi_page_image_extractions(page_results: List[Dict[str, str]]) -> Tu
                 "amount": amount,
                 "score": score,
                 "currency_short": str(row.get("currency_short") or "").strip().upper(),
-                "amount_source": str(row.get("amount_source") or "").strip(),
                 "requires_review_ai": bool(row.get("requires_review_ai", False)),
             }
         )
@@ -1934,7 +1911,6 @@ def merge_multi_page_image_extractions(page_results: List[Dict[str, str]]) -> Tu
             merged["currency_short"] = str(best.get("currency_short") or "").strip().upper()
             selected_currency_page = selected_amount_page
             meta["currency_selected_page"] = selected_currency_page
-        merged["amount_source"] = str(best.get("amount_source") or "").strip()
         merged["requires_review_ai"] = bool(best.get("requires_review_ai", False))
 
     def _pick_first_non_empty(keys: List[str]) -> str:
@@ -2142,9 +2118,8 @@ def extract_invoice_core_fields(text: str, invoice_id: str = "", excel_data: Opt
     det_amount = str(parsed.get("amount_foreign") or parsed.get("amount") or "").strip()
     out["amount"] = _normalize_amount(det_amount)
     out["currency_short"] = str(parsed.get("currency") or "").strip().upper()
-    out["amount_source"] = str(parsed.get("amount_source") or "").strip()
     out["requires_review_ai"] = bool(parsed.get("requires_review", False))
-    
+
     # Fuzzy-match and set nature_of_remittance
     nature_suggestion = str(parsed.get("nature_of_remittance") or "").strip()
     if nature_suggestion:
@@ -2154,21 +2129,11 @@ def extract_invoice_core_fields(text: str, invoice_id: str = "", excel_data: Opt
             logger.info("classification_normalized invoice_id=%s nature_before=%r nature_after=%r", invoice_id, nature_suggestion, matched_nature)
         if matched_nature:
             logger.info("nature_of_remittance_matched suggestion=%s matched=%s", nature_suggestion, matched_nature)
-    
-    # Fuzzy-match and set purpose_group
-    group_suggestion = str(parsed.get("purpose_group") or "").strip()
-    if group_suggestion:
-        matched_group = _fuzzy_match_purpose_group(group_suggestion)
-        out["purpose_group"] = matched_group
-        if invoice_id:
-            logger.info("classification_normalized invoice_id=%s purpose_group_before=%r purpose_group_after=%r", invoice_id, group_suggestion, matched_group)
-        if matched_group:
-            logger.info("purpose_group_matched suggestion=%s matched=%s", group_suggestion, matched_group)
-    
-    # Fuzzy-match and set purpose_code (filtered by group if available)
+
+    # Fuzzy-match and set purpose_code (search all groups)
     code_suggestion = str(parsed.get("purpose_code") or "").strip()
     if code_suggestion:
-        matched_code = _fuzzy_match_purpose_code(code_suggestion, out["purpose_group"])
+        matched_code = _fuzzy_match_purpose_code(code_suggestion, "")
         out["purpose_code"] = matched_code
         if invoice_id:
             logger.info("classification_normalized invoice_id=%s purpose_code_before=%r purpose_code_after=%r", invoice_id, code_suggestion, matched_code)
@@ -2323,9 +2288,7 @@ def extract_invoice_core_fields_from_image(
         det_amount = str(parsed.get("amount_foreign") or parsed.get("amount") or "").strip()
         out["amount"] = _normalize_amount(det_amount)
         out["currency_short"] = str(parsed.get("currency") or "").strip().upper()
-        out["amount_source"] = str(parsed.get("amount_source") or "").strip()
         out["requires_review_ai"] = bool(parsed.get("requires_review", False))
-        out["line_items"] = parsed.get("line_items", [])
         
         # Fuzzy-match nature_of_remittance
         nature_suggestion = str(parsed.get("nature_of_remittance") or "").strip()
@@ -2335,18 +2298,10 @@ def extract_invoice_core_fields_from_image(
             if matched_nature:
                 logger.info("image_nature_matched suggestion=%s matched=%s", nature_suggestion, matched_nature)
         
-        # Fuzzy-match purpose_group
-        group_suggestion = str(parsed.get("purpose_group") or "").strip()
-        if group_suggestion:
-            matched_group = _fuzzy_match_purpose_group(group_suggestion)
-            out["purpose_group"] = matched_group
-            if matched_group:
-                logger.info("image_purpose_group_matched suggestion=%s matched=%s", group_suggestion, matched_group)
-        
         # Fuzzy-match purpose_code
         code_suggestion = str(parsed.get("purpose_code") or "").strip()
         if code_suggestion:
-            matched_code = _fuzzy_match_purpose_code(code_suggestion, out["purpose_group"])
+            matched_code = _fuzzy_match_purpose_code(code_suggestion, "")
             out["purpose_code"] = matched_code
             if matched_code:
                 logger.info("image_purpose_code_matched suggestion=%s matched=%s group=%s", code_suggestion, matched_code, out["purpose_group"])
@@ -2511,21 +2466,16 @@ def extract_invoice_core_fields_from_multi_images(
         det_amount = str(parsed.get("amount_foreign") or parsed.get("amount") or "").strip()
         out["amount"] = _normalize_amount(det_amount)
         out["currency_short"] = str(parsed.get("currency") or "").strip().upper()
-        out["amount_source"] = str(parsed.get("amount_source") or "").strip()
         out["requires_review_ai"] = bool(parsed.get("requires_review", False))
-        
+
         # Fuzzy matches
         nature_sug = str(parsed.get("nature_of_remittance") or "").strip()
         if nature_sug:
             out["nature_of_remittance"] = _fuzzy_match_nature(nature_sug)
-        
-        group_sug = str(parsed.get("purpose_group") or "").strip()
-        if group_sug:
-            out["purpose_group"] = _fuzzy_match_purpose_group(group_sug)
-        
+
         code_sug = str(parsed.get("purpose_code") or "").strip()
         if code_sug:
-            out["purpose_code"] = _fuzzy_match_purpose_code(code_sug, out["purpose_group"])
+            out["purpose_code"] = _fuzzy_match_purpose_code(code_sug, "")
 
         if out["purpose_code"]:
             derived_group = _purpose_group_for_code(out["purpose_code"])

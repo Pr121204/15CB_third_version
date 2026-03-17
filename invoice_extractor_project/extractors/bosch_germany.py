@@ -335,6 +335,7 @@ def extract(text, words=None):
         
         addr = addr.replace("&e", "ße")
         addr = addr.replace("Sc8hillerhoehe", "Schillerhoehe")
+        addr = addr.replace("Gerli 3n1gen", "Gerlingen")
         data["beneficiary_address"] = re.sub(r",\s*$", "", addr)
     elif m_rh:
         data["beneficiary_address"] = m_rh.group(1).split("\n")[0].strip()
@@ -404,10 +405,13 @@ def extract(text, words=None):
         text, re.IGNORECASE
     )
     m_mobility = re.search(r"Bosch\s+Mobility\s+Platform", text, re.I)
+    m_etas     = re.search(r"ETAS\s+Automotive\s+India", text, re.I)
     m_ltd        = re.search(r"Bosch\s+L[\s_I|l]*td[\s_I|l]*\.", text, re.IGNORECASE)
 
     if m_mobility:
         data["remitter_name"] = "Bosch Mobility Platform and Solutions India Private Limited"
+    elif m_etas:
+        data["remitter_name"] = "ETAS Automotive India Private Ltd."
     elif m_limited:
         data["remitter_name"] = "BOSCH LIMITED"
     elif m_rexroth:
@@ -458,12 +462,20 @@ def extract(text, words=None):
             data["remitter_address"] = _normalize_pincode_city(addr)
             matched = True
 
+    # Strategy 1.8: ETAS — bill-to block
+    if not matched and m_etas:
+        block_lines = _extract_bill_to_block(text, r"ETAS\s+Automotive\s+India")
+        if block_lines:
+            addr = _clean_address_text(", ".join(block_lines))
+            data["remitter_address"] = _normalize_pincode_city(addr)
+            matched = True
+
     # Strategy 2: Dispatch / Services address line (skipped if garbled OCR)
     if not matched:
         dispatch = _clean_dispatch_line(text)
         if dispatch and not _is_garbled(dispatch):
             m_d = re.search(
-                r"(?:Dispatch|Services)\s*(?:address|ad\.)\s*:?\s*Bosch[^,]+,\s*(.+)",
+                r"(?:Dispatch|Services)\s*(?:address|ad\.)\s*:?\s*(?:Bosch|ETAS)[^,]+,\s*(.+)",
                 dispatch, re.IGNORECASE,
             )
             if m_d:
@@ -567,6 +579,9 @@ def extract(text, words=None):
         zone = text[label_m.end():label_m.end()+60]
         # Skip small noise/labels like "(VAT):" or "%"
         zone = re.sub(r"\(VAT\)|VAT|%|0\.000", "", zone, flags=re.I)
+        # Normalize split EUR e.g. "EU\nR. 2" -> "EUR 2"
+        zone = re.sub(r"EU[\s\n\r]+R", "EUR", zone, flags=re.I)
+        
         m_num = re.search(
             r"(?:([A-H J-Z]{3})\s*)?([\d,. ]{4,})",
             zone, re.IGNORECASE
@@ -575,10 +590,17 @@ def extract(text, words=None):
             # Currency: check original zone for 3-letter words
             cur_m = re.search(r"\b(EUR|USD|GBP|CHF|JPY|CZK|HUF|THB|VND|CNY)\b", zone, re.I)
             data["currency"] = cur_m.group(1).upper() if cur_m else ""
-            # Amount: first numeric token
+            # Amount: pick the first numeric token that isn't just a page number or single digit
+            # (Heuristic: typical invoice amounts have decimals or at least 2 separator chars in this template)
             amt_raw = m_num.group(2).strip()
-            amt_parts = [p for p in re.split(r"[\s\n\r]+", amt_raw) if re.search(r"\d", p)]
-            data["amount_foreign"] = amt_parts[0] if amt_parts else ""
+            # If multiple tokens, pick the one that looks most like a large amount (e.g. contains dot/comma)
+            amt_tokens = [p for p in re.split(r"[\s\n\r]+", amt_raw) if re.search(r"\d", p)]
+            if len(amt_tokens) > 1:
+                # Prioritize tokens with separators
+                best = [t for t in amt_tokens if re.search(r"[,.]", t)]
+                data["amount_foreign"] = best[0] if best else amt_tokens[0]
+            else:
+                data["amount_foreign"] = amt_tokens[0] if amt_tokens else ""
     
     if not data.get("amount_foreign"):
         # Fallback to secondary labels if still empty
