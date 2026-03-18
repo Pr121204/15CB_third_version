@@ -889,7 +889,15 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
                         cls.high_signal_hit,
                     )
 
-            use_classifier_for_nature = strong_classifier and (use_classifier_for_purpose or not gemini_nature)
+            # Use classifier for nature when:
+            # 1. Strong classifier (original condition)
+            # 2. No Gemini nature to fall back to (local extraction) AND classifier has any result
+            #    — without this, locally-extracted invoices always get NatureRemCategory=""
+            #    which fails XML validation ("Nature of remittance must be selected").
+            use_classifier_for_nature = (
+                (strong_classifier and (use_classifier_for_purpose or not gemini_nature))
+                or (not gemini_nature and bool(cls.nature.code))
+            )
             if use_classifier_for_nature:
                 source_nature = "classifier"
                 form["NatureRemCategory"] = cls.nature.code

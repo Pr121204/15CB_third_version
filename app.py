@@ -611,12 +611,37 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                     )
                     if check_local_completeness(_candidate, inv_id=inv_id):
                         extracted = _candidate
+                        # Ensure all expected output keys exist even if empty so downstream
+                        # consumers (e.g. ZIP exports) don't drop the invoice.
+                        for k in (
+                            "remitter_name",
+                            "remitter_address",
+                            "remitter_country_text",
+                            "beneficiary_name",
+                            "beneficiary_address",
+                            "beneficiary_country_text",
+                            "invoice_number",
+                            "invoice_date",
+                            "invoice_date_iso",
+                            "invoice_date_display",
+                        ):
+                            extracted.setdefault(k, "")
                         _use_local = True
                         logger.info(
                             "local_extraction_success invoice_id=%s template=%s "
-                            "beneficiary=%r amount=%s currency=%s date_iso=%s",
+                            "remitter=%r remitter_address=%r remitter_country=%r "
+                            "beneficiary=%r beneficiary_address=%r beneficiary_country=%r "
+                            "invoice_number=%r invoice_date=%r "
+                            "amount=%s currency=%s date_iso=%s",
                             inv_id, _template_type,
+                            extracted.get("remitter_name"),
+                            extracted.get("remitter_address"),
+                            extracted.get("remitter_country_text"),
                             extracted.get("beneficiary_name"),
+                            extracted.get("beneficiary_address"),
+                            extracted.get("beneficiary_country_text"),
+                            extracted.get("invoice_number"),
+                            extracted.get("invoice_date"),
                             extracted.get("amount"),
                             extracted.get("currency_short"),
                             extracted.get("invoice_date_iso"),

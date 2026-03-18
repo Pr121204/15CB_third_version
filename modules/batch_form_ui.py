@@ -84,7 +84,7 @@ def _parse_iso_date(value: str) -> date | None:
     text = str(value or "").strip()
     if not text:
         return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d.%m.%Y"):
         try:
             return datetime.strptime(text, fmt).date()
         except ValueError:
@@ -573,7 +573,7 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         form["InvoiceDate"] = new_inv_date
 
         if form["InvoiceDate"] and _parse_iso_date(form["InvoiceDate"]) is None:
-            st.warning("Invoice Date format should be DD/MM/YYYY.")
+            st.warning("Invoice Date format should be DD/MM/YYYY or DD.MM.YYYY.")
 
     inv_lc, inv_rc = st.columns([2, 3])
     with inv_lc:
@@ -658,7 +658,10 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         # Show the remitter name (not composed name+address) in the header field so
         # that both PAN lookup and the XML NameRemitter field receive the pure entity
         # name.  The address is displayed separately in the remitter address widget.
-        if f"{invoice_id}_header_remitter_name" not in st.session_state:
+        # Initialise (or restore if stale-empty) so the widget always shows extracted data
+        # on first render. Only overwrite when the stored value is empty; non-empty values
+        # reflect intentional user edits and are preserved.
+        if not st.session_state.get(f"{invoice_id}_header_remitter_name") and display_remitter:
             st.session_state[f"{invoice_id}_header_remitter_name"] = display_remitter
         new_remitter = st.text_input(
             "Name of the Remitter",
@@ -700,9 +703,9 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
     with h2c5:
         # Show final composed beneficiary (XML-ready) in the top header field.
         # Mirrored into Section A as read-only.
-        if beneficiary_header_key not in st.session_state:
+        if not st.session_state.get(beneficiary_header_key) and display_beneficiary:
             st.session_state[beneficiary_header_key] = display_beneficiary
-        if beneficiary_section_a_key not in st.session_state:
+        if not st.session_state.get(beneficiary_section_a_key) and display_beneficiary:
             st.session_state[beneficiary_section_a_key] = display_beneficiary
 
         new_beneficiary = st.text_input(
