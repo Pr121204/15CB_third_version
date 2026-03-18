@@ -87,7 +87,7 @@ def extract(text, words=None):
     addr_lines = []
     for line in lines[1:5]:  # Check next 4 lines
         line = line.strip()
-        if not line or re.search(r"Internal purposes|Our VAT|Our Business|Page \d+", line, re.IGNORECASE):
+        if not line or re.search(r"Internal purposes|Our VAT|Our Business|Page \d+|Original|Copy|Duplicate", line, re.IGNORECASE):
             break
         addr_lines.append(line)
     data["beneficiary_address"] = ", ".join(addr_lines)
