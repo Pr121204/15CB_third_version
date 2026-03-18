@@ -534,7 +534,7 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
     # in the "Invoice No" column; use it in preference to the AI-extracted value.
     excel_invoice_no = str(config.get("excel_invoice_no") or "").strip()
     form["InvoiceNumber"] = excel_invoice_no or str(extracted.get("invoice_number") or "").strip()
-    form["InvoiceDate"] = str(extracted.get("invoice_date_iso") or "").strip()
+    form["InvoiceDate"] = str(extracted.get("invoice_date_display") or "").strip()
 
     form["AmtPayForgnRem"] = extracted.get("amount", "")
     form["CurrencySecbCode"] = resolved_currency.get("code", "")

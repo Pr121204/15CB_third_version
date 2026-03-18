@@ -439,6 +439,7 @@ def map_local_to_gemini_format(
         "beneficiary_address":        str(raw_fields.get("beneficiary_address", "") or "").strip(),
         "beneficiary_country_text":   bene_country,
         "invoice_number":             str(raw_fields.get("invoice_number", "") or "").strip(),
+        "invoice_date":               date_display,
         "invoice_date_raw":           date_raw,
         "invoice_date_iso":           date_iso,
         "invoice_date_display":       date_display,

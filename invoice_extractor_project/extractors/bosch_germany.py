@@ -75,6 +75,10 @@ def _normalize_name(raw):
         r"\s+(?!GmbH|SRL|KFT|NV|BV|SE|AG|AB|AS|LLC|INC|LTD)[A-Z]{2,8}\s*$",
         "", name
     ).strip()
+
+    if name.upper() in ["COVERPAGE", "COVER FOR INVOICE"]:
+        return ""
+
     return (name if name else raw).upper()
 
 
@@ -255,12 +259,20 @@ def extract(text, words=None):
         if not _l:
             continue
             
+        # 0. Skip cover page junk
+        if re.search(r"^(coverpage|cover\s+for\s+invoice|invoice\s*no\.?)$", _l.rstrip(":"), re.I):
+            if not _name_lines:
+                continue
+
         # 1. Break on definitive invoice/page headers
         # Even if they have "Invoice No" or "Date Invoice" and are long
         if re.search(r"\b(Invoice|Sz[áa]mla|BillingDocument|Page)\b", _l, re.I):
             if len(_l) < 25 or re.search(r"Invoice\s*No|Date\s*Invoice", _l, re.I):
                 if not re.search(r"Bosch", _l, re.I):
-                    break
+                    if _name_lines:
+                        break
+                    else:
+                        continue
 
         # 2. Skip solo "Page" or "Invoice" noise lines (already matched by break if appropriate)
         if re.search(r"^(Page\s*[\d/ ]+|Invoice\s*[\d/ ]*)$", _l, re.IGNORECASE) and not re.search(r"Bosch", _l, re.I):
@@ -565,10 +577,14 @@ def extract(text, words=None):
     # Allows intermediate noise/digits e.g. "Invoice No. 2 7057441295"
     # Allows "Doc. no./date:" for Rexroth
     m_inv = re.search(
-        r"(?:Invoice\s*(?:No\.?|Doc)|Sz[áa]mla\s+sz[áa]m|Doc\.\s*no\./date)\s*[:+>]*\s*(?:\b\d\b\s+)?([A-Z0-9/-]{5,})",
+        r"(?:Invoice\s*(?:No\.?|Doc)|Sz[áa]mla\s+sz[áa]m|Doc\.\s*no\./date)\s*[:+>]*\s*(?:\b\d\b\s+)?([A-Z0-9/-]*[0-9][A-Z0-9/-]*)",
         text, re.IGNORECASE
     )
-    data["invoice_number"] = m_inv.group(1).strip() if m_inv else ""
+    inv_no = m_inv.group(1).strip() if m_inv else ""
+    # Ensure it's likely a number (at least 5 chars or has digits)
+    if len(inv_no) < 5 and not re.search(r"\d", inv_no):
+        inv_no = ""
+    data["invoice_number"] = inv_no
 
     # ── Invoice date ──────────────────────────────────────────────────────────
     # Allows up to 25 chars of OCR noise between label and date value.

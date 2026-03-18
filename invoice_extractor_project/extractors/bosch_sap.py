@@ -24,7 +24,7 @@ _INDIA_TOKENS = {"INDIE", "INDIA", "IN"}
 # Legal suffixes to strip when normalising beneficiary name
 _NAME_STRIP = re.compile(
     r"\s*[,\s]+"
-    r"(?:GmbH|SAS|S\.A\.S\.|spol\.\s*s\s*r\.\s*o\.|Ltd\.| "
+    r"(?:GmbH|SAS|S\.A\.S\.|spol\.\s*s\s*r\.\s*o\.|s\.r\.o\.|Ltd\.| "
     r"SE|AG|NV|BV|S\.A\.|S\.p\.A\.|Oy|AB|AS|ApS|Inc\.|LLC|"
     r"France|Deutschland|Japan|Czech|Polska).*$",
     re.IGNORECASE,
@@ -82,47 +82,15 @@ def extract(text, words=None):
     vat_prefix = m_vat.group(1).upper() if m_vat else ""
     data["beneficiary_country"] = _COUNTRY_MAP.get(vat_prefix, vat_prefix)
 
-    # ── Beneficiary address: RegisteredOffice line ────────────────────────────
-    # Compressed: "RegisteredOffice RobertBosch,spol.sr.o.,RobertaBosche2678,37004 CeskeBudejovice"
-    # Spaced:     "Registered Office Robert Bosch, spol. s r.o., Roberta Bosche 2678, ..."
-    m_ro = re.search(
-        r"(?:Registered\s*Office|RegisteredOffice)\s+(.+)",
-        text, re.IGNORECASE,
-    )
-    if m_ro:
-        ro = m_ro.group(1).strip()
-        # Drop entity name (up to second comma) to get pure address
-        parts = ro.split(",")
-        if len(parts) >= 3:
-            # "Robert Bosch, spol. s r.o., Roberta Bosche 2678, 370 04 ..."
-            # Skip first 1-2 parts that are the entity name
-            # Find first part that looks like a street (has digits)
-            addr_parts = []
-            skip_done = False
-            for p in parts:
-                p = p.strip()
-                if not skip_done:
-                    if re.search(r"\d", p):
-                        skip_done = True
-                        addr_parts.append(p)
-                else:
-                    # Stop at "registered in" clause
-                    if re.search(r"registered\s+in|district\s+court", p, re.IGNORECASE):
-                        break
-                    addr_parts.append(p)
-            if addr_parts:
-                addr = ", ".join(addr_parts).strip()
-                # Drop "registered..." clause (compressed or spaced)
-                addr = re.sub(r",?\s*registered.*$", "", addr, flags=re.IGNORECASE).strip()
-                # Fix compressed text: "RobertaBosche2678" -> "Roberta Bosche 2678"
-                addr = _decompress_text(addr)
-                data["beneficiary_address"] = addr
-            else:
-                data["beneficiary_address"] = ro
-        else:
-            data["beneficiary_address"] = ro
-    else:
-        data["beneficiary_address"] = ""
+    # ── Beneficiary address: from lines after name ────────────────────────────
+    lines = text.splitlines()
+    addr_lines = []
+    for line in lines[1:5]:  # Check next 4 lines
+        line = line.strip()
+        if not line or re.search(r"Internal purposes|Our VAT|Our Business|Page \d+", line, re.IGNORECASE):
+            break
+        addr_lines.append(line)
+    data["beneficiary_address"] = ", ".join(addr_lines)
 
     # ── Remitter name ─────────────────────────────────────────────────────────
     # data["remitter_country"] = "India"  # Replaced by dynamic detection in address step

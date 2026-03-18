@@ -1691,7 +1691,8 @@ def render_form_15cb(
     # SPEC: TDS active | NON_TDS visible but disabled
     _dedn_d = _parse_iso_date(str(form.get("DednDateTds") or ""))
     if not _dedn_d:
-        _dedn_d = date.today()
+        _inv_date = _parse_iso_date(str(form.get("InvoiceDate") or ""))
+        _dedn_d = _inv_date or date.today()
 
     lc, rc = st.columns(ratio)
     with lc:
@@ -1705,7 +1706,7 @@ def render_form_15cb(
             key=f"{invoice_id}_13_dedn_date",
             disabled=(not is_tds),   # SPEC: TDS active, NON_TDS disabled
             label_visibility="collapsed",
-            format="DD/MM/YYYY",
+            format="%d/%m/%Y",
         )
         if is_tds:
             form["DednDateTds"] = _dedn_val.strftime("%d/%m/%Y")

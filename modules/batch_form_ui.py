@@ -65,9 +65,10 @@ def compose_name_remittee(beneficiary_name: str, invoice_number: str, invoice_da
 
     dt_text = ""
     if invoice_date_iso:
-        try:
-            dt_text = datetime.strptime(invoice_date_iso, "%Y-%m-%d").strftime("%d.%m.%Y")
-        except ValueError:
+        dt = _parse_iso_date(invoice_date_iso)
+        if dt:
+            dt_text = dt.strftime("%d.%m.%Y")
+        else:
             dt_text = invoice_date_iso
 
     parts = [beneficiary_name]
@@ -539,7 +540,7 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
 
     # Invoice reference (legacy fields from previous review UI).
     invoice_number_default = str(form.get("InvoiceNumber") or extracted.get("invoice_number") or "")
-    invoice_date_default = str(form.get("InvoiceDate") or extracted.get("invoice_date_iso") or "")
+    invoice_date_default = str(form.get("InvoiceDate") or extracted.get("invoice_date_display") or "")
     remitter_address_default = _display_remitter_address(
         str(form.get("NameRemitterInput") or extracted.get("remitter_name") or ""),
         str(form.get("RemitterAddress") or extracted.get("remitter_address") or ""),
@@ -603,7 +604,11 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
 
     raw_beneficiary = str(form.get("NameRemitteeInput") or extracted.get("beneficiary_name") or "").strip()
     invoice_no = str(form.get("InvoiceNumber") or extracted.get("invoice_number") or "").strip()
-    invoice_date_iso = str(form.get("InvoiceDate") or extracted.get("invoice_date_iso") or "").strip()
+    invoice_date_iso = str(extracted.get("invoice_date_iso") or "").strip()
+    if not invoice_date_iso:
+        parsed = _parse_iso_date(str(form.get("InvoiceDate") or ""))
+        if parsed:
+            invoice_date_iso = parsed.isoformat()
 
     # Compose the final beneficiary text that is expected in XML
     composed_beneficiary = compose_name_remittee(raw_beneficiary, invoice_no, invoice_date_iso)
