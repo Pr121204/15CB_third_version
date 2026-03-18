@@ -24,6 +24,7 @@ from typing import Dict, Optional, Tuple
 from dateutil import parser as _dateutil_parser
 
 from modules.currency_mapping import SHORT_CODE_TARGET_NAME as _VALID_CURRENCY_CODES  # type: ignore
+from modules.pdf_text_quality import assess_pdf_text_quality
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,28 @@ def check_local_completeness(mapped: Dict, inv_id: str = "") -> bool:
         )
         return False
 
-    # ── 6. Beneficiary name/address must not mention India ────────────────────
+    # ── 6. VAT breakdown consistency: net_amount + vat_amount must ≈ amount ───
+    # Only checked when BOTH sub-fields are populated (bosch_germany VAT case).
+    # Tolerance of 2% accounts for rounding differences in extracted values.
+    _net_str = str(mapped.get("net_amount", "") or "").strip()
+    _vat_str = str(mapped.get("vat_amount", "") or "").strip()
+    if _net_str and _vat_str:
+        try:
+            _total = float(mapped["amount"])
+            _net   = float(_net_str)
+            _vat   = float(_vat_str)
+            _tolerance = max(abs(_total) * 0.02, 0.05)  # 2% or 5 cents, whichever larger
+            if abs(_net + _vat - _total) > _tolerance:
+                logger.info(
+                    "local_completeness_fail %sreason=vat_math_inconsistent "
+                    "net=%s vat=%s sum=%s total=%s — Gemini will be called",
+                    tag, _net_str, _vat_str, _net + _vat, _total,
+                )
+                return False
+        except (ValueError, TypeError):
+            pass  # If any value can't be parsed, skip the check (already caught by check #3)
+
+    # ── 7. Beneficiary name/address must not mention India ────────────────────
     bene_name = str(mapped.get("beneficiary_name", "") or "").strip()
     bene_addr = str(mapped.get("beneficiary_address", "") or "").strip()
     if "india" in bene_name.lower() or "india" in bene_addr.lower():
@@ -339,7 +361,7 @@ def check_local_completeness(mapped: Dict, inv_id: str = "") -> bool:
         )
         return False
 
-    # ── 7. Beneficiary name too long → almost certainly an address block ──────
+    # ── 8. Beneficiary name too long → almost certainly an address block ──────
     if len(bene_name) > 200:
         logger.info(
             "local_completeness_fail %sreason=beneficiary_name_too_long len=%d "
@@ -444,6 +466,8 @@ def map_local_to_gemini_format(
         "invoice_date_iso":           date_iso,
         "invoice_date_display":       date_display,
         "amount":                     amount_clean,
+        "net_amount":                 _clean_amount(str(raw_fields.get("net_amount", "") or "")),
+        "vat_amount":                 _clean_amount(str(raw_fields.get("vat_amount", "") or "")),
         "currency_short":             currency,
         # ── Classification (filled by remittance_classifier from _raw_invoice_text) ──
         "nature_of_remittance":       "",
@@ -516,6 +540,17 @@ def try_local_extraction_from_bytes(
         text = remove_hex_strings(text)
         if not text.strip():
             logger.info("local_extractor_hex_only_pdf — Gemini image path will run")
+            return None, "generic", ""
+
+        quality = assess_pdf_text_quality([text])
+        if not quality["usable"]:
+            logger.info(
+                "local_extractor_skipped_low_quality_text reason=%s cid_tokens=%s bad_line_ratio=%.2f "
+                "- Gemini image path will run",
+                quality.get("reason", ""),
+                quality.get("cid_tokens", 0),
+                quality.get("bad_line_ratio", 0.0),
+            )
             return None, "generic", ""
 
         # Identify the invoice template

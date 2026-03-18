@@ -615,42 +615,95 @@ def extract(text, words=None):
     data["invoice_date"] = dt
 
     # ── Amount & currency ─────────────────────────────────────────────────────
-    # Priority: Invoice amount → Total Invoice Value → Total amount (CUR) → Value of Services/goods
-    # Labels like "* Invoice amount" or "Invoice amount :"
-    # Using multi-step search for robustness against OCR noise
-    label_m = re.search(
-        r"(?:Invoice\s+amount|Total\s+amount|Total\s+Invoice\s+Value|Value\s+of\s+goods)",
-        text, re.IGNORECASE
+    # Bosch Germany invoices may include a VAT breakdown in the form:
+    #   Net amount:  CNY 5,330.81
+    #   Value Added Tax (VAT) : 6.000 % CNY 319.85
+    #   Invoice amount : CNY 5,650.66
+    #
+    # Strategy (each label searched independently, not via first-match):
+    #   1. "Invoice amount"  → always the total payable (highest priority)
+    #   2. "Net amount"      → base before VAT
+    #   3. "Value Added Tax" → VAT component
+    #   4. Fallback labels   → Total Invoice Value / Total amount / Value of goods
+    _CURR_RE = r"(EUR|USD|GBP|CHF|JPY|CZK|HUF|THB|VND|CNY)"
+    _AMT_RE  = r"([\d,.]+)"
+
+    # Search for each of the three VAT-breakdown labels independently.
+    m_inv_amt = re.search(
+        rf"Invoice\s+amount\s*:?\s*{_CURR_RE}\s*{_AMT_RE}",
+        text, re.IGNORECASE,
     )
-    if label_m:
-        zone = text[label_m.end():label_m.end()+60]
-        # Skip small noise/labels like "(VAT):" or "%"
-        zone = re.sub(r"\(VAT\)|VAT|%|0\.000", "", zone, flags=re.I)
-        # Normalize split EUR e.g. "EU\nR. 2" -> "EUR 2"
-        zone = re.sub(r"EU[\s\n\r]+R", "EUR", zone, flags=re.I)
-        
-        m_num = re.search(
-            r"(?:([A-H J-Z]{3})\s*)?([\d,. ]{4,})",
-            zone, re.IGNORECASE
-        )
-        if m_num:
-            # Currency: check original zone for 3-letter words
-            cur_m = re.search(r"\b(EUR|USD|GBP|CHF|JPY|CZK|HUF|THB|VND|CNY)\b", zone, re.I)
-            data["currency"] = cur_m.group(1).upper() if cur_m else ""
-            # Amount: pick the first numeric token that isn't just a page number or single digit
-            # (Heuristic: typical invoice amounts have decimals or at least 2 separator chars in this template)
-            amt_raw = m_num.group(2).strip()
-            # If multiple tokens, pick the one that looks most like a large amount (e.g. contains dot/comma)
-            amt_tokens = [p for p in re.split(r"[\s\n\r]+", amt_raw) if re.search(r"\d", p)]
-            if len(amt_tokens) > 1:
-                # Prioritize tokens with separators
-                best = [t for t in amt_tokens if re.search(r"[,.]", t)]
-                data["amount_foreign"] = best[0] if best else amt_tokens[0]
+    m_net_amt = re.search(
+        rf"Net\s+amount\s*:?\s*{_CURR_RE}\s*{_AMT_RE}",
+        text, re.IGNORECASE,
+    )
+    m_vat_amt = re.search(
+        rf"Value\s+Added\s+Tax\s*(?:\(VAT\))?\s*:?\s*[\d.]+\s*%\s*{_CURR_RE}\s*{_AMT_RE}",
+        text, re.IGNORECASE,
+    )
+
+    if m_inv_amt:
+        # Explicit invoice total found — use it as amount_foreign
+        data["currency"] = m_inv_amt.group(1).upper()
+        data["amount_foreign"] = m_inv_amt.group(2).strip()
+        # Only treat as VAT case when BOTH net_amount and vat_amount are present
+        if m_net_amt and m_vat_amt:
+            data["net_amount"] = m_net_amt.group(2).strip()
+            data["vat_amount"] = m_vat_amt.group(2).strip()
+        else:
+            data["net_amount"] = ""
+            data["vat_amount"] = ""
+
+    elif m_net_amt and m_vat_amt:
+        # No explicit invoice total, but net + VAT are present → compute total
+        data["currency"] = m_net_amt.group(1).upper()
+        data["net_amount"] = m_net_amt.group(2).strip()
+        data["vat_amount"] = m_vat_amt.group(2).strip()
+        try:
+            from text_utils import parse_invoice_amount  # type: ignore
+            net_val = parse_invoice_amount(data["net_amount"])
+            vat_val = parse_invoice_amount(data["vat_amount"])
+            if net_val is not None and vat_val is not None:
+                data["amount_foreign"] = f"{net_val + vat_val:.2f}"
             else:
-                data["amount_foreign"] = amt_tokens[0] if amt_tokens else ""
-    
+                # Parsing failed; fall through to fallback below
+                data["net_amount"] = ""
+                data["vat_amount"] = ""
+                data["amount_foreign"] = ""
+        except Exception:
+            data["net_amount"] = ""
+            data["vat_amount"] = ""
+            data["amount_foreign"] = ""
+
+    else:
+        # No VAT breakdown — standard single-amount extraction
+        data["net_amount"] = ""
+        data["vat_amount"] = ""
+
+    # Fallback when amount_foreign is still empty: try other total labels
     if not data.get("amount_foreign"):
-        # Fallback to secondary labels if still empty
+        label_m = re.search(
+            r"(?:Total\s+amount|Total\s+Invoice\s+Value)",
+            text, re.IGNORECASE,
+        )
+        if label_m:
+            zone = text[label_m.end():label_m.end()+60]
+            zone = re.sub(r"\(VAT\)|VAT|%|0\.000", "", zone, flags=re.I)
+            zone = re.sub(r"EU[\s\n\r]+R", "EUR", zone, flags=re.I)
+            m_num = re.search(r"(?:([A-HJ-Z]{3})\s*)?([\d,. ]{4,})", zone, re.IGNORECASE)
+            if m_num:
+                cur_m = re.search(r"\b(EUR|USD|GBP|CHF|JPY|CZK|HUF|THB|VND|CNY)\b", zone, re.I)
+                data["currency"] = cur_m.group(1).upper() if cur_m else ""
+                amt_raw = m_num.group(2).strip()
+                amt_tokens = [p for p in re.split(r"[\s\n\r]+", amt_raw) if re.search(r"\d", p)]
+                if len(amt_tokens) > 1:
+                    best = [t for t in amt_tokens if re.search(r"[,.]", t)]
+                    data["amount_foreign"] = best[0] if best else amt_tokens[0]
+                else:
+                    data["amount_foreign"] = amt_tokens[0] if amt_tokens else ""
+
+    if not data.get("amount_foreign"):
+        # Final fallback: "Value of Services/goods" label
         m_vs = re.search(
             r"Value\s+of\s+(?:Services|goods)\s*:?\s*(EUR|USD|GBP|CHF|JPY|CZK|HUF|THB|VND|CNY)\s*([\d,. ]+)",
             text, re.IGNORECASE,

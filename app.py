@@ -82,6 +82,7 @@ from modules.master_data import validate_bsr_code, validate_dtaa_rate, validate_
 from modules.currency_mapping import is_currency_code_valid_for_xml
 from modules.logger import get_logger
 from modules.amount_extractor import extract_amount_candidate_from_pages
+from modules.pdf_text_quality import assess_pdf_text_quality
 
 
 # -----------------------------------------------------------------------------
@@ -256,6 +257,20 @@ def _get_invoice_dedn_date(inv: Dict[str, Any]) -> str:
     if isinstance(excel, dict):
         return str(excel.get("dedn_date_tds") or "").strip()
     return ""
+
+
+def _display_date(value: str) -> str:
+    """Convert any parseable date string to DD/MM/YYYY for UI display.
+    Returns the original string unchanged if parsing fails."""
+    text = str(value or "").strip()
+    if not text:
+        return text
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    return text
 
 
 # -----------------------------------------------------------------------------
@@ -539,6 +554,12 @@ def _apply_safe_deterministic_amount_override(
                 candidate.get("page_number", 0),
             )
         extracted["amount"] = candidate_amount
+        # The deterministic scanner replaces the Gemini-extracted total.
+        # Any VAT sub-fields (net_amount, vat_amount) that Gemini extracted were
+        # relative to the old total and are now inconsistent — clear them so the
+        # calculator does not incorrectly trigger the VAT case with a stale net.
+        extracted["net_amount"] = ""
+        extracted["vat_amount"] = ""
         if candidate_currency and not extracted.get("currency_short"):
             extracted["currency_short"] = candidate_currency
         elif billing_currency and not extracted.get("currency_short"):
@@ -689,15 +710,35 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                     pages_text = []
                     text = ""
             text_len = len(text.strip())
-            route_mode = "text" if text_len >= TEXT_EXTRACTION_MIN_THRESHOLD else "image_multi"
+            text_quality = assess_pdf_text_quality(pages_text if pages_text else ([text] if text else []))
+            text_usable = bool(text_quality.get("usable"))
+            route_mode = (
+                "text"
+                if text_len >= TEXT_EXTRACTION_MIN_THRESHOLD and text_usable
+                else "image_multi"
+            )
             logger.info(
-                "pdf_extraction_route invoice_id=%s file=%s text_len=%s threshold=%s mode=%s",
+                "pdf_extraction_route invoice_id=%s file=%s text_len=%s threshold=%s mode=%s "
+                "text_usable=%s text_reason=%s cid_tokens=%s bad_line_ratio=%.2f",
                 inv_id,
                 file_name,
                 text_len,
                 TEXT_EXTRACTION_MIN_THRESHOLD,
                 route_mode,
+                text_usable,
+                text_quality.get("reason", ""),
+                text_quality.get("cid_tokens", 0),
+                text_quality.get("bad_line_ratio", 0.0),
             )
+            if text_len >= TEXT_EXTRACTION_MIN_THRESHOLD and not text_usable:
+                logger.warning(
+                    "pdf_text_layer_rejected invoice_id=%s file=%s reason=%s cid_tokens=%s bad_line_ratio=%.2f",
+                    inv_id,
+                    file_name,
+                    text_quality.get("reason", ""),
+                    text_quality.get("cid_tokens", 0),
+                    text_quality.get("bad_line_ratio", 0.0),
+                )
             if route_mode == "text":
                 logger.info("GEMINI_CALLED invoice_id=%s route=pdf_text", inv_id)
                 extracted = extract_invoice_core_fields(text, invoice_id=inv_id, excel_data=inv.get("excel", {}))
@@ -740,27 +781,28 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                         excel_data=inv.get("excel", {})
                     )
 
-                    # Deferred OCR: only run when Gemini extraction failed.
-                    # When Gemini succeeds, its amount is reliable so the
-                    # deterministic amount override can safely receive empty
-                    # page texts (it simply won't find a candidate).
                     page_ocr_texts: List[str] = []
                     gemini_failed = extracted.get("_extraction_quality") == "failed"
 
-                    if gemini_failed:
-                        def _ocr_page(img_bytes):
-                            try:
-                                return extract_text_from_image_file(img_bytes) or ""
-                            except Exception:
-                                logger.exception("image_ocr_fallback_failed file=%s", file_name)
-                                return ""
+                    def _ocr_page(img_bytes):
+                        try:
+                            return extract_text_from_image_file(img_bytes) or ""
+                        except Exception:
+                            logger.exception("image_ocr_fallback_failed file=%s", file_name)
+                            return ""
 
-                        with ThreadPoolExecutor() as pool:
-                            page_ocr_texts = list(pool.map(_ocr_page, page_image_bytes_list))
+                    with ThreadPoolExecutor() as pool:
+                        page_ocr_texts = list(pool.map(_ocr_page, page_image_bytes_list))
 
                     # Combine OCR text from all pages
                     raw_text = "\n".join(t for t in page_ocr_texts if t.strip())
                     extracted["_raw_invoice_text"] = raw_text
+                    logger.info(
+                        "pdf_image_ocr_text_captured invoice_id=%s file=%s ocr_text_len=%s",
+                        inv_id,
+                        file_name,
+                        len(raw_text.strip()),
+                    )
 
                     # OCR-text fallback: if vision returned nothing but OCR produced text,
                     # run the standard text-based Gemini extractor on the OCR output.
@@ -1339,7 +1381,7 @@ def render_bulk_invoice_page() -> None:
                 currency = ex.get("currency") or "—"
                 exchange_rate = ex.get("exchange_rate")
                 exchange_rate_str = f"{float(exchange_rate):.4f}" if exchange_rate and float(exchange_rate) > 0 else "—"
-                dedn_date = ex.get("dedn_date_tds") or "—"
+                dedn_date = _display_date(str(ex.get("dedn_date_tds") or "")) or "—"
 
                 with st.container(border=True):
                     st.markdown(f'''
@@ -1918,7 +1960,7 @@ def render_single_invoice_page() -> None:
             currency = ex.get("currency") or "—"
             exchange_rate = ex.get("exchange_rate")
             exchange_rate_str = f"{float(exchange_rate):.4f}" if exchange_rate and float(exchange_rate) > 0 else "—"
-            dedn_date = ex.get("dedn_date_tds") or "—"
+            dedn_date = _display_date(str(ex.get("dedn_date_tds") or "")) or "—"
             with st.container(border=True):
                 st.markdown(f'''
                 <div class="excel-card">
@@ -2274,7 +2316,7 @@ def render_no_excel_invoice_page() -> None:
                 <div><span class="label">Exchange Rate</span> <span class="arrow">→</span>
                      <code>{ex_rate_str}</code></div>
                 <div><span class="label">Deduction Date</span> <span class="arrow">→</span>
-                     <code>{ex.get("dedn_date_tds") or "—"}</code></div>
+                     <code>{_display_date(str(ex.get("dedn_date_tds") or "")) or "—"}</code></div>
             </div>
             ''', unsafe_allow_html=True)
 

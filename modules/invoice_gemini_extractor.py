@@ -439,6 +439,14 @@ You must determine Amount in Foreign Currency (FCY) using the following strict o
 3. Stage 3 — Totals block interpretation: If totals are unclear, infer from subtotal/tax/net/gross values.
 4. Stage 4 — Excel fallback (LAST STAGE): If text does not provide a reliable amount, use the FCY amount from the Excel data provided. Set "requires_review": true.
 
+NET AMOUNT / VAT BREAKDOWN
+If the invoice explicitly shows a net amount (subtotal before VAT/tax) AND a separate VAT or tax line that together sum to the invoice total:
+- "amount_foreign" = the TOTAL invoice amount (including VAT). This field is ALWAYS the payable total.
+- "net_amount" = the base amount BEFORE VAT/tax (e.g. "Net Value", "Subtotal", "Net Amount").
+- "vat_amount" = the VAT or tax amount on that line (e.g. "VAT", "GST", "Tax Amount").
+If NO explicit net+VAT breakdown is visible, leave both "net_amount" and "vat_amount" as empty strings ("").
+Do NOT guess or decompose. Only populate these fields when both values are explicitly labelled in the invoice.
+
 ADDRESS RULES
 Do not merge addresses from different parties. Each party must have its own exact address block.
 
@@ -470,6 +478,8 @@ Return ONLY JSON.
   "invoice_number": "",
   "invoice_date": "",
   "amount_foreign": "",
+  "net_amount": "",
+  "vat_amount": "",
   "currency": "",
   "nature_of_remittance": "",
   "purpose_code": "",
@@ -524,6 +534,7 @@ This is a business invoice. You MUST find and extract every field that is visibl
 - Supplier address (registered office or company address block — extract the POSTAL address with street/number/postal-code/city, NOT the department or division name)
 - Beneficiary name is the legal entity name ONLY, do not include departments or divisions
 - Total invoice amount (FINAL total only, NOT subtotals — check last page for "Invoice amount", "Grand Total", "Net amount", "Total due", "Amount Payable", "Invoice Total")
+- Net amount and VAT amount ONLY if the invoice explicitly shows a net+VAT breakdown where net + VAT = total; otherwise leave both empty.
 - Currency (3-letter ISO code near the amount: EUR, USD, JPY, GBP, SGD, CHF, SEK, NOK etc.)
 - Service description (what was charged — line item descriptions or service title)
 
@@ -538,6 +549,8 @@ Return valid JSON only with exactly this structure:
   "invoice_number": "",
   "invoice_date": "",
   "amount_foreign": "",
+  "net_amount": "",
+  "vat_amount": "",
   "currency": "",
   "nature_of_remittance": "",
   "purpose_code": "",
@@ -562,6 +575,8 @@ Required JSON Structure:
   "invoice_number": "",
   "invoice_date": "",
   "amount_foreign": "",
+  "net_amount": "",
+  "vat_amount": "",
   "currency": "",
   "nature_of_remittance": "",
   "purpose_code": "",
@@ -569,11 +584,12 @@ Required JSON Structure:
 }
 Rules:
 1. Follow the 4-stage amount extraction policy (Invoice Total -> Summary Block -> Inference -> Excel fallback).
-2. Use Excel data ONLY if invoice text fails for amount.
-3. Accurate name/address extraction is mandatory.
-4. For beneficiary_address: extract POSTAL address only (street, building number, postal code, city). Do NOT return company name or division/department as address. If "Company address:" or "Registered address:" label exists, use it.
-5. For beneficiary_name: legal company name ONLY, no divisions or departments.
-6. Return valid JSON only.
+2. "amount_foreign" is ALWAYS the total payable (including VAT). Populate "net_amount" and "vat_amount" ONLY when an explicit net+VAT breakdown is visible in the invoice; leave empty otherwise.
+3. Use Excel data ONLY if invoice text fails for amount.
+4. Accurate name/address extraction is mandatory.
+5. For beneficiary_address: extract POSTAL address only (street, building number, postal code, city). Do NOT return company name or division/department as address. If "Company address:" or "Registered address:" label exists, use it.
+6. For beneficiary_name: legal company name ONLY, no divisions or departments.
+7. Return valid JSON only.
 """
 
 
@@ -2026,6 +2042,8 @@ def extract_invoice_core_fields(text: str, invoice_id: str = "", excel_data: Opt
         "invoice_date_iso": "",
         "invoice_date_display": "",
         "amount": "",
+        "net_amount": "",
+        "vat_amount": "",
         "currency_short": "",
         "nature_of_remittance": "",
         "purpose_group": "",
@@ -2138,6 +2156,11 @@ def extract_invoice_core_fields(text: str, invoice_id: str = "", excel_data: Opt
     # Handle amount_foreign and amount_source from new prompt
     det_amount = str(parsed.get("amount_foreign") or parsed.get("amount") or "").strip()
     out["amount"] = _normalize_amount(det_amount)
+    # VAT case: extract net and VAT amounts when Gemini returns an explicit breakdown
+    _net_raw = str(parsed.get("net_amount") or "").strip()
+    _vat_raw = str(parsed.get("vat_amount") or "").strip()
+    out["net_amount"] = _normalize_amount(_net_raw) if _net_raw else ""
+    out["vat_amount"] = _normalize_amount(_vat_raw) if _vat_raw else ""
     out["currency_short"] = str(parsed.get("currency") or "").strip().upper()
     out["requires_review_ai"] = bool(parsed.get("requires_review", False))
 
@@ -2260,6 +2283,8 @@ def extract_invoice_core_fields_from_image(
         "invoice_date_iso": "",
         "invoice_date_display": "",
         "amount": "",
+        "net_amount": "",
+        "vat_amount": "",
         "currency_short": "",
         "nature_of_remittance": "",
         "purpose_group": "",
@@ -2268,10 +2293,10 @@ def extract_invoice_core_fields_from_image(
         "remitter_country_text": "",
         "_excel_text": "",
     }
-    
+
     if excel_data:
         out["_excel_text"] = str(excel_data.get("Text") or "").strip()
-    
+
     backend = _gemini_backend()
     GEMINI_API_KEY, GEMINI_MODEL_NAME = _get_gemini_config()
     if not GEMINI_API_KEY or not backend:
@@ -2282,7 +2307,7 @@ def extract_invoice_core_fields_from_image(
             bool(google_genai is not None and google_genai_types is not None),
         )
         return out
-    
+
     try:
         logger.info(
             "image_extract_start image_source=%s backend=%s",
@@ -2320,9 +2345,14 @@ def extract_invoice_core_fields_from_image(
         # Handle amount_foreign and amount_source from new prompt
         det_amount = str(parsed.get("amount_foreign") or parsed.get("amount") or "").strip()
         out["amount"] = _normalize_amount(det_amount)
+        # VAT case: extract net and VAT amounts when Gemini returns an explicit breakdown
+        _net_raw = str(parsed.get("net_amount") or "").strip()
+        _vat_raw = str(parsed.get("vat_amount") or "").strip()
+        out["net_amount"] = _normalize_amount(_net_raw) if _net_raw else ""
+        out["vat_amount"] = _normalize_amount(_vat_raw) if _vat_raw else ""
         out["currency_short"] = str(parsed.get("currency") or "").strip().upper()
         out["requires_review_ai"] = bool(parsed.get("requires_review", False))
-        
+
         # Fuzzy-match nature_of_remittance
         nature_suggestion = str(parsed.get("nature_of_remittance") or "").strip()
         if nature_suggestion:
@@ -2427,6 +2457,8 @@ def extract_invoice_core_fields_from_multi_images(
         "invoice_date_iso": "",
         "invoice_date_display": "",
         "amount": "",
+        "net_amount": "",
+        "vat_amount": "",
         "currency_short": "",
         "nature_of_remittance": "",
         "purpose_group": "",
@@ -2434,7 +2466,7 @@ def extract_invoice_core_fields_from_multi_images(
         "remitter_country_text": "",
         "_excel_text": "",
     }
-    
+
     if not images_list:
         return out
     
@@ -2498,6 +2530,11 @@ def extract_invoice_core_fields_from_multi_images(
         
         det_amount = str(parsed.get("amount_foreign") or parsed.get("amount") or "").strip()
         out["amount"] = _normalize_amount(det_amount)
+        # VAT case: extract net and VAT amounts when Gemini returns an explicit breakdown
+        _net_raw = str(parsed.get("net_amount") or "").strip()
+        _vat_raw = str(parsed.get("vat_amount") or "").strip()
+        out["net_amount"] = _normalize_amount(_net_raw) if _net_raw else ""
+        out["vat_amount"] = _normalize_amount(_vat_raw) if _vat_raw else ""
         out["currency_short"] = str(parsed.get("currency") or "").strip().upper()
         out["requires_review_ai"] = bool(parsed.get("requires_review", False))
 

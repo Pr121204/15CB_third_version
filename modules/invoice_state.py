@@ -554,7 +554,19 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
     # back to today's date to preserve legacy behaviour.
     dedn_cfg = str(config.get("tds_deduction_date") or "").strip()
     dedn_valid = _is_valid_iso_date(dedn_cfg)
-    form["DednDateTds"] = dedn_cfg if dedn_valid else ""
+    if dedn_valid:
+        # Normalise to DD/MM/YYYY so the text input in the UI always shows the
+        # user-friendly format regardless of how the date was stored upstream.
+        _dedn_d = None
+        for _fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                _dedn_d = datetime.strptime(dedn_cfg, _fmt).date()
+                break
+            except ValueError:
+                pass
+        form["DednDateTds"] = _dedn_d.strftime("%d/%m/%Y") if _dedn_d else dedn_cfg
+    else:
+        form["DednDateTds"] = ""
     state["meta"]["dedn_date_missing"] = not dedn_valid
     state["meta"]["dedn_date_invalid"] = bool(dedn_cfg) and not dedn_valid
     # Proposed date of remittance is always today + offset, as per

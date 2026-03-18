@@ -297,6 +297,33 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
     invoice_inr = Decimal(str(inr)) # Rounded INR amount
     exchange_rate_dec = Decimal(str(exchange_rate))
 
+    # VAT case: invoice has an explicit net+VAT breakdown; net_amount is the taxable income
+    # (VAT is not income chargeable to tax under Section 8B).
+    _net_fcy_raw = str(extracted.get("net_amount") or "").strip()
+    net_fcy = _to_float(_net_fcy_raw) or 0.0
+    if _net_fcy_raw and net_fcy == 0.0:
+        logger.warning(
+            "vat_case_skipped invoice_id=%s reason=net_amount_not_parseable "
+            "raw_net_amount=%r — treating as standard case",
+            invoice_id, _net_fcy_raw,
+        )
+    is_vat_case = bool(net_fcy > 0 and fcy > 0 and net_fcy < fcy)
+
+    if is_vat_case:
+        chargeable_inr_exact = Decimal(str(net_fcy)) * exchange_rate_dec
+        chargeable_inr_dec = chargeable_inr_exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        logger.info(
+            "vat_case_detected invoice_id=%s net_fcy=%s total_fcy=%s chargeable_inr=%s",
+            invoice_id, _fmt_num(net_fcy), _fmt_num(fcy), chargeable_inr_dec,
+        )
+    else:
+        chargeable_inr_exact = invoice_inr_exact  # full invoice amount (exact Decimal)
+        chargeable_inr_dec = invoice_inr           # full invoice amount (rounded Decimal)
+
+    # Update AmtIncChrgIt with the correct chargeable base (overrides the early default at line 281).
+    # Mode branches (TDS, NON_TDS) will further override this for their specific paths.
+    form["AmtIncChrgIt"] = _fmt_num(float(chargeable_inr_dec))
+
     logger.info(
         "recompute_start invoice_id=%s mode=%s fcy=%s inr=%s fx=%s dtaa_rate=%s",
         invoice_id,
@@ -347,7 +374,7 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
 
         if gross_rate_dec < 100:
             # Net → Gross: gross_inr = net_inr * 100 / (100 - rate)
-            gross_inr_exact = invoice_inr_exact * Decimal("100") / (Decimal("100") - gross_rate_dec)
+            gross_inr_exact = chargeable_inr_exact * Decimal("100") / (Decimal("100") - gross_rate_dec)
             gross_inr_rounded = gross_inr_exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
             # TDS at gross-up rate on grossed-up INR
@@ -423,11 +450,11 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
             applied_rate_dec = dtaa_rate_dec if dtaa_claimed else it_rate_dec
 
         it_rate_dec = Decimal(str(it_factor))
-        it_liab = invoice_inr * (it_rate_dec / Decimal("100"))
-        dtaa_liab = invoice_inr * (applied_rate_dec / Decimal("100")) if dtaa_claimed else Decimal("0")
+        it_liab = chargeable_inr_dec * (it_rate_dec / Decimal("100"))
+        dtaa_liab = chargeable_inr_dec * (applied_rate_dec / Decimal("100")) if dtaa_claimed else Decimal("0")
         # Compute TDS in INR first (integer), then derive FCY from rounded INR to avoid
         # back-calculation drift (e.g. FCY×rate rounded ≠ INR×rate rounded / fx).
-        tds_inr_dec = invoice_inr * (applied_rate_dec / Decimal("100"))
+        tds_inr_dec = chargeable_inr_dec * (applied_rate_dec / Decimal("100"))
         tds_inr_rounded = tds_inr_dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         if exchange_rate_dec > 0:
             tds_fcy_dec = (tds_inr_rounded / exchange_rate_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -436,10 +463,10 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         actual_fcy = (invoice_fcy - tds_fcy_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         # INR tax amounts should be whole rupees (rounded)
-        form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(invoice_inr)))
+        form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(chargeable_inr_dec)))
         form["TaxLiablIt"] = _fmt_num(_round_to_int(float(it_liab)))
         if dtaa_claimed:
-            form["TaxIncDtaa"] = _fmt_num(_round_to_int(float(invoice_inr)))
+            form["TaxIncDtaa"] = _fmt_num(_round_to_int(float(chargeable_inr_dec)))
             form["TaxLiablDtaa"] = _fmt_num(_round_to_int(float(dtaa_liab)))
             form["RateTdsADtaa"] = str(int(round(float(applied_rate_dec))))
             form["RateTdsSecB"] = form["RateTdsADtaa"]
@@ -478,7 +505,7 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
     elif mode == MODE_TDS and str(form.get("BasisDeterTax") or "").strip() == "Act":
         # Income Tax Act Section 195 path – uses user-selected rate
         effective_rate, basis_text = get_effective_it_rate(selected_it_rate)
-        tax_liable_it = _round_to_int(inr * (effective_rate / 100.0))
+        tax_liable_it = _round_to_int(float(chargeable_inr_dec) * (effective_rate / 100.0))
         tax_fcy = float(tax_liable_it) / exchange_rate if exchange_rate else 0.0
         
         form["TaxLiablIt"] = _fmt_num(tax_liable_it)
@@ -548,14 +575,14 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
                 )
                 logger.info("non_tds_dtaa_rate_unavailable invoice_id=%s fallback=20.80", invoice_id)
 
-        it_liab = invoice_inr * (use_rate_dec / Decimal("100"))
+        it_liab = chargeable_inr_dec * (use_rate_dec / Decimal("100"))
         # Preserve user's chargeability choice; default to N for NON_TDS (no TDS withheld).
         existing_chargeable = str(form.get("RemittanceCharIndia") or "").strip().upper()
         form["RemittanceCharIndia"] = existing_chargeable if existing_chargeable in ("Y", "N") else "N"
         # Only populate IT Act documentary fields when chargeability is Y.
         # When user marks N, these fields are suppressed in the final XML anyway, so keep them blank.
         if form["RemittanceCharIndia"] == "Y":
-            form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(invoice_inr)))
+            form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(chargeable_inr_dec)))
             form["TaxLiablIt"] = _fmt_num(_round_to_int(float(it_liab)))
             form["BasisDeterTax"] = basis_text
         else:

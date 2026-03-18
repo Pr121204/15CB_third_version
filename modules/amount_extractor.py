@@ -42,7 +42,7 @@ AMOUNT_PATTERNS = [
     ("de_nettobetrag",     re.compile(rf"Nettobetrag[\s:]*{_AMOUNT_VALUE_RE}", re.IGNORECASE)),
     ("de_bruttobetrag",    re.compile(rf"Bruttobetrag[\s:]*{_AMOUNT_VALUE_RE}", re.IGNORECASE)),
     ("de_zahlbetrag",      re.compile(rf"Zahlbetrag[\s:]*{_AMOUNT_VALUE_RE}", re.IGNORECASE)),
-    ("de_summe",           re.compile(rf"Summe[\s:]*{_AMOUNT_VALUE_RE}", re.IGNORECASE)),
+    ("de_summe",           re.compile(rf"(?<!\w)Summe(?!\w)[\s:]*{_AMOUNT_VALUE_RE}", re.IGNORECASE)),
     # French (Fix 1)
     ("fr_montant_total",   re.compile(rf"Montant\s+total[\s:]*{_AMOUNT_VALUE_RE}", re.IGNORECASE)),
     ("fr_total_ttc",       re.compile(rf"Total\s+TTC[\s:]*{_AMOUNT_VALUE_RE}", re.IGNORECASE)),
