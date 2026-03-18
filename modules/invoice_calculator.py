@@ -425,9 +425,15 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         it_rate_dec = Decimal(str(it_factor))
         it_liab = invoice_inr * (it_rate_dec / Decimal("100"))
         dtaa_liab = invoice_inr * (applied_rate_dec / Decimal("100")) if dtaa_claimed else Decimal("0")
-        tds_fcy_dec = invoice_fcy * (applied_rate_dec / Decimal("100"))
+        # Compute TDS in INR first (integer), then derive FCY from rounded INR to avoid
+        # back-calculation drift (e.g. FCY×rate rounded ≠ INR×rate rounded / fx).
         tds_inr_dec = invoice_inr * (applied_rate_dec / Decimal("100"))
-        actual_fcy = max(invoice_fcy - tds_fcy_dec, Decimal("0"))
+        tds_inr_rounded = tds_inr_dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        if exchange_rate_dec > 0:
+            tds_fcy_dec = (tds_inr_rounded / exchange_rate_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        else:
+            tds_fcy_dec = Decimal("0.00")
+        actual_fcy = (invoice_fcy - tds_fcy_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         # INR tax amounts should be whole rupees (rounded)
         form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(invoice_inr)))
@@ -447,10 +453,10 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
             form["OtherRemDtaa"] = "N"
             form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_IT_ACT
 
-        # Foreign currency TDS and actual remittance keep up to 2 decimals
-        form["AmtPayForgnTds"] = _fmt_num(float(tds_fcy_dec))
-        form["AmtPayIndianTds"] = _fmt_num(_round_to_int(float(tds_inr_dec)))
-        form["ActlAmtTdsForgn"] = _fmt_num(float(actual_fcy))
+        # Foreign currency TDS and actual remittance — already 2dp from computation above.
+        form["AmtPayForgnTds"] = str(tds_fcy_dec)
+        form["AmtPayIndianTds"] = str(int(tds_inr_rounded))
+        form["ActlAmtTdsForgn"] = str(actual_fcy)
         form["RemForRoyFlg"] = "Y" if dtaa_claimed else "N"
 
         form["BasisDeterTax"] = it_basis

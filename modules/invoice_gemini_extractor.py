@@ -2150,6 +2150,18 @@ def extract_invoice_core_fields(text: str, invoice_id: str = "", excel_data: Opt
             logger.info("classification_normalized invoice_id=%s nature_before=%r nature_after=%r", invoice_id, nature_suggestion, matched_nature)
         if matched_nature:
             logger.info("nature_of_remittance_matched suggestion=%s matched=%s", nature_suggestion, matched_nature)
+        else:
+            # Fuzzy match found no standard label for Gemini's description.
+            # Preserve the raw text so downstream code can surface it as a
+            # review hint — without it the suggestion is silently discarded
+            # and the user never knows Gemini had an opinion.
+            out["_gemini_nature_raw"] = nature_suggestion
+            out["requires_review"] = True
+            logger.warning(
+                "nature_of_remittance_unmatched invoice_id=%s suggestion=%r "
+                "action=preserved_as_review_hint",
+                invoice_id, nature_suggestion,
+            )
 
     # Fuzzy-match and set purpose_code (search all groups)
     code_suggestion = str(parsed.get("purpose_code") or "").strip()

@@ -975,6 +975,20 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
             extracted.get("purpose_code"),
             extracted.get("purpose_group"),
         )
+        # If Gemini provided a nature description that couldn't be mapped to a
+        # standard code, surface it now so it isn't silently buried.  The
+        # fallback values above are still used for the XML — only the log/flag
+        # changes so the reviewer knows to verify the classification manually.
+        _raw_hint = str(extracted.get("_gemini_nature_raw") or "").strip()
+        if _raw_hint:
+            resolved["remittance_needs_review"] = "1"
+            logger.warning(
+                "classification_review_required invoice_id=%s "
+                "gemini_nature_suggestion=%r "
+                "fallback_applied=FEES_FOR_TECHNICAL_SERVICES/S1023 "
+                "action=manual_review_needed",
+                invoice_id, _raw_hint,
+            )
 
     rem = match_remitter(extracted.get("remitter_name", ""))
     if rem:
@@ -1074,11 +1088,32 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
         "state_build_done invoice_id=%s form_snapshot=%s",
         invoice_id,
         {
-            "RemitterPAN": form.get("RemitterPAN", ""),
-            "CountryRemMadeSecb": form.get("CountryRemMadeSecb", ""),
-            "RateTdsADtaa": form.get("RateTdsADtaa", ""),
-            "TaxLiablIt": form.get("TaxLiablIt", ""),
-            "AmtPayForgnTds": form.get("AmtPayForgnTds", ""),
+            # Identity
+            "NameRemitterInput":          form.get("NameRemitterInput", ""),
+            "RemitterAddress":            form.get("RemitterAddress", ""),
+            "NameRemitteeInput":          form.get("NameRemitteeInput", ""),
+            "RemitteeCountryCode":        form.get("RemitteeCountryCode", ""),
+            # Address parts
+            "RemitteeFlatDoorBuilding":   form.get("RemitteeFlatDoorBuilding", ""),
+            "RemitteeAreaLocality":       form.get("RemitteeAreaLocality", ""),
+            "RemitteeTownCityDistrict":   form.get("RemitteeTownCityDistrict", ""),
+            # Invoice reference
+            "InvoiceNumber":              form.get("InvoiceNumber", ""),
+            "InvoiceDate":                form.get("InvoiceDate", ""),
+            # Amounts & currency
+            "AmtPayForgnRem":             form.get("AmtPayForgnRem", ""),
+            "AmtPayIndRem":               form.get("AmtPayIndRem", ""),
+            "CurrencySecbCode":           form.get("CurrencySecbCode", ""),
+            # Classification
+            "NatureRemCategory":          form.get("NatureRemCategory", ""),
+            "_purpose_code":              form.get("_purpose_code", ""),
+            "_purpose_group":             form.get("_purpose_group", ""),
+            # Remitter master
+            "RemitterPAN":                form.get("RemitterPAN", ""),
+            "CountryRemMadeSecb":         form.get("CountryRemMadeSecb", ""),
+            "RateTdsADtaa":               form.get("RateTdsADtaa", ""),
+            "TaxLiablIt":                 form.get("TaxLiablIt", ""),
+            "AmtPayForgnTds":             form.get("AmtPayForgnTds", ""),
         },
     )
     return state

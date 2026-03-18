@@ -15,7 +15,7 @@ _COUNTRY_MAP = {
     "IT": "Italy",  "ES": "Spain",          "BE": "Belgium",
     "AT": "Austria","SE": "Sweden",          "PL": "Poland",
     "CZ": "Czech Republic",                  "HU": "Hungary", "RO": "Romania", "PT": "Portugal",
-    "JP": "Japan",   "KR": "Korea",   "DE": "Germany",
+    "JP": "Japan",   "KR": "Korea",   "DE": "Germany", "US": "USA",
     "TH": "Thailand", "VN": "Vietnam", "BD": "Bangladesh",
     "AT": "Austria", "ATU": "Austria",
 }
@@ -34,6 +34,8 @@ _COUNTRY_KEYWORDS = [
     ("China",    "China"),       ("CHINA",    "China"),       ("Wuxi", "China"), ("Suzhou", "China"),
     ("Austria",  "Austria"),     ("AUSTRIA",  "Austria"),     ("Wien", "Austria"), ("Hallein", "Austria"),
     ("Bangladesh", "Bangladesh"), ("Dhaka", "Bangladesh"),
+    ("USA",      "USA"),         ("LLC",      "USA"),
+    ("Michigan", "USA"),         ("MI 48",    "USA"),
     ("Germany", "Germany"),      ("GERMANY", "Germany"),
     ("Stuttgart","Germany"),     ("Gerlingen","Germany"),
 ]
@@ -66,7 +68,9 @@ def _normalize_name(raw):
     name = re.sub(r"^BOSCH\s+(?=Bosch)", "", name, flags=re.IGNORECASE)
     # Strip address leaks e.g. "Bosch Rexroth AG, Zum Eisengief/ßer..."
     name = re.sub(r",?\s+\bZum\s+Eisengie[sßf]er.*$", "", name, flags=re.IGNORECASE)
-    # Strip trailing standalone brand-logo token (e.g. 'Robert Bosch GmbH BOSCH')
+    # Strip logo artifacts like "@" or "BOSCH" logo text
+    name = re.sub(r"\s+@\s*BOSCH.*$", "", name, flags=re.I)
+    name = re.sub(r"\s+@\s*$", "", name).strip()
     name = re.sub(
         r"\s+(?!GmbH|SRL|KFT|NV|BV|SE|AG|AB|AS|LLC|INC|LTD)[A-Z]{2,8}\s*$",
         "", name
@@ -214,6 +218,7 @@ def _extract_remitter_from_block(text):
                 l = re.sub(r"\s+[a-z\d]\s+\d\s+\d.*$", "", l, flags=re.IGNORECASE).strip()
                 l = re.sub(r"\s+[a-z\d](\s+\d)+$", "", l, flags=re.IGNORECASE).strip()
                 l = re.sub(r"\s+\d$", "", l).strip()
+                l = _RIGHT_COL_NOISE_RE.sub("", l).strip()
                 l = re.sub(r"\s+Ship\s+to.*", "", l, flags=re.IGNORECASE).strip()
 
                 # 2. Stop logic (search is broad but allows city info on same line)
@@ -243,33 +248,43 @@ def _extract_remitter_from_block(text):
 def extract(text, words=None):
     data = {}
 
-    # ── Beneficiary name ──────────────────────────────────────────────────────
-    # Collect across multiple lines until a recognised legal suffix is found.
-    # e.g. "Bosch Technology Licensing\nAdministration GmbH" → one name.
-    # Also strips page-suffix noise ("Invoice 1 / 2" → stop collecting).
     _name_lines = []
-    for _l in text.splitlines():
+    lines = text.splitlines()
+    for i, _l in enumerate(lines):
         _l = _l.strip()
         if not _l:
             continue
-        # Skip solo "Page" or "Invoice" lines unless they contain "Bosch"
+            
+        # 1. Break on definitive invoice/page headers
+        # Even if they have "Invoice No" or "Date Invoice" and are long
+        if re.search(r"\b(Invoice|Sz[áa]mla|BillingDocument|Page)\b", _l, re.I):
+            if len(_l) < 25 or re.search(r"Invoice\s*No|Date\s*Invoice", _l, re.I):
+                if not re.search(r"Bosch", _l, re.I):
+                    break
+
+        # 2. Skip solo "Page" or "Invoice" noise lines (already matched by break if appropriate)
         if re.search(r"^(Page\s*[\d/ ]+|Invoice\s*[\d/ ]*)$", _l, re.IGNORECASE) and not re.search(r"Bosch", _l, re.I):
             continue
-        _l = re.sub(r"\s*/\s*\d.*$", "", _l).strip()   # strip "/ 2" page suffixes
-        if not _l:
+            
+        _l_clean = re.sub(r"\s*/\s*\d.*$", "", _l).strip()   # strip "/ 2" page suffixes
+        if not _l_clean:
             continue
+
+        _name_lines.append(_l_clean)
+        
+        # 3. Break on legal suffix
         if re.search(
-            r"\b(Invoice|Sz[áa]mla|BillingDocument|Billing\s+Document|Page)\b",
-            _l, re.IGNORECASE
-        ) and len(_l) < 20 and not re.search(r"Bosch", _l, re.I):
-            break
-        _name_lines.append(_l)
-        if re.search(
-            r"\b(GmbH|SRL|KFT|Kft\.|Ltd\.|Limited|S\.A\.S\.|spol\.|"
+            r"\b(GmbH|SRL|KFT|Kft\.?|Ltd\.?|Limited|S\.A\.S\.|spol\.|"
             r"Corp\.|Inc\.|LLC|AG|NV|BV|SE|Company)\b",
-            _l, re.IGNORECASE
+            _l_clean, re.IGNORECASE
         ):
+            # Peak ahead: if next line is a parenthetical branch note like "(Suzhou)", don't break yet
+            if i + 1 < len(lines):
+                next_l = lines[i+1].strip()
+                if next_l.startswith("(") and next_l.endswith(")"):
+                    continue
             break
+            
     raw_name = " ".join(_name_lines) if _name_lines else ""
     raw_name = re.sub(r"\s*/\s*$", "", raw_name).strip()
     data["beneficiary_name"] = _normalize_name(raw_name)
@@ -314,24 +329,32 @@ def extract(text, words=None):
             break
 
     m_ca = re.search(
-        r"Company\s+(?:address|ad\.)\s*:?\s*(.+)",
+        r"Company\s+(?:address|ad\.)\s*:?\s*([\s\n]*)(.+)",
         _ca_text, re.IGNORECASE
     )
     # Rexroth header pattern is highly specific and reliable
     m_rh = re.search(r"Bosch\s+Rexroth\s+AG,?\s*(Zum\s+Eisengie[sßf]er.*)", text, re.I)
 
     if m_ca:
-        addr = m_ca.group(1).strip().rstrip(",").strip()
+        addr = m_ca.group(2).strip().rstrip(",").strip()
         # Collect subsequent lines if they look like address parts
         idx = _ca_text.find(m_ca.group(0))
         rest = _ca_text[idx + len(m_ca.group(0)):].lstrip()
-        for cand_line in rest.splitlines()[:3]:
+        for cand_line in rest.splitlines()[:8]:
             cand_l = cand_line.strip()
             if not cand_l: continue
-            if re.search(r"\b(ISHO|Timisoara|Judet|postal|Timis|Office|Building|Floor|Bulevardul)\b", cand_l, re.I):
+            if re.search(r"\b(ISHO|Timisoara|Judet|postal|Timis|Office|Building|Floor|Bulevardul|Hills|Drive|MI|USA|Legal|Street|St\.|Road|Avenue|Lane|P\.O\.?|Box|MI\s+\d|Farmington)\b", cand_l, re.I):
+                addr += ", " + cand_l
+            elif re.search(r"Robert\s+Bosch\s+LLC", cand_l, re.I):
+                continue # name repeat in block
+            elif re.match(r"^\d{5}(?:-\d{4})?$", cand_l): # USA zipcode alone on line
+                addr += " " + cand_l
+            elif re.search(r"^[A-Z][a-z]+,\s*[A-Z]{2}\s+\d{5}", cand_l): # Farmington Hills, MI 48331
                 addr += " " + cand_l
             else:
-                break
+                # If we already have some address, and this line doesn't match, stop.
+                if len(addr.split()) > 4:
+                    break
         
         addr = addr.replace("&e", "ße")
         addr = addr.replace("Sc8hillerhoehe", "Schillerhoehe")
@@ -370,8 +393,9 @@ def extract(text, words=None):
                 addr = addr.replace("&e", "ße")
                 data["beneficiary_address"] = addr
             else:
-                # Bangladesh specific address pattern (House-.*?Bangladesh)
-                m_bd = re.search(r"(House-.*?Bangladesh)", text, re.IGNORECASE | re.S)
+                # Bangladesh specific address pattern (Building...House-...Bangladesh)
+                # Handles OCR typos like "Hcouse"
+                m_bd = re.search(r"((?:“[^”]+”|[\w\s]+)?[,\s]*H[co]*use-.*?Bangladesh)", text, re.IGNORECASE | re.S)
                 if m_bd:
                     addr = m_bd.group(1).replace("\n", " ")
                     addr = re.sub(r"\s{2,}", " ", addr).strip()
@@ -563,8 +587,15 @@ def extract(text, words=None):
         # Normalize: replace commas with dots and strip internal spaces
         dt = re.sub(r",", ".", dt)
         dt = re.sub(r"\s+", "", dt)
-        # Year part: handle garbled 5th digit
-        dt = re.sub(r"(\d{4})\d$", r"\1", dt)
+        # Year part: handle garbled 5-6 digit strings specifically looking for 20XX
+        # e.g. "27025" -> "2025", "32025" -> "2025"
+        m_year = re.search(r"(202\d)", dt)
+        if m_year:
+            # Reconstruct with the found year if it was likely prefixed by noise
+            dt = re.sub(r"\d{4,6}$", m_year.group(1), dt)
+        else:
+            # Fallback to existing 5th-digit truncate
+            dt = re.sub(r"(\d{4})\d$", r"\1", dt)
     data["invoice_date"] = dt
 
     # ── Amount & currency ─────────────────────────────────────────────────────

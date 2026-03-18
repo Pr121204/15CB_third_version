@@ -141,6 +141,44 @@ def _has_xml_sensitive_form_changes(old_form: Dict[str, Any], new_form: Dict[str
     return False
 
 
+# Form and meta keys whose values fully determine recompute_invoice output.
+# Any change to these requires a fresh recompute; identical values mean the
+# previous result is still valid and the call can be skipped.
+_RECOMPUTE_WATCHED_FORM_KEYS = (
+    "AmtPayForgnRem", "AmtPayIndRem", "_ui_inr_manual_override",
+    "RateTdsADtaa", "dtaa_rate", "dtaa_mode",
+    "CountryRemMadeSecb", "BasisDeterTax",
+    "ItActRateSelected", "NonTdsBasisRateMode",
+    "RemittanceCharIndia", "OtherRemDtaa", "TaxResidCert",
+    "NatureRemCategory",
+)
+
+
+def _recompute_input_sig(state: Dict[str, Any]) -> tuple:
+    """Stable signature of every input that affects recompute_invoice output.
+
+    Used to skip redundant calls when Streamlit re-renders without any state
+    change (e.g. three back-to-back renders after st.rerun()).
+    """
+    meta = state.get("meta") or {}
+    form = state.get("form") or {}
+    resolved = state.get("resolved") or {}
+
+    form_vals = tuple(str(form.get(k) or "") for k in _RECOMPUTE_WATCHED_FORM_KEYS)
+    # UI overrides are sorted so the tuple is order-stable across renders.
+    override_items = tuple(
+        (k, str(form[k] or ""))
+        for k in sorted(k for k in form if k.startswith("_ui_override_"))
+    )
+    meta_vals = (
+        str(meta.get("mode") or ""),
+        str(meta.get("exchange_rate") or ""),
+        str(meta.get("is_gross_up") or ""),
+    )
+    resolved_vals = (str(resolved.get("dtaa_rate_percent") or ""),)
+    return form_vals + override_items + meta_vals + resolved_vals
+
+
 def _validate_xml_fields(fields: Dict[str, str], mode: str = MODE_TDS, dedn_date_iso: str = "") -> List[str]:
     """Validate XML fields before generation.
 
@@ -557,6 +595,17 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                         inv_id,
                     )
                 if _local_raw is not None and _template_type != "generic":
+                    # Log every raw field the template extractor returned.
+                    _RAW_LOG_KEYS = (
+                        "remitter_name", "remitter_address", "remitter_country",
+                        "beneficiary_name", "beneficiary_address", "beneficiary_country",
+                        "invoice_number", "invoice_date", "amount_foreign", "currency",
+                    )
+                    logger.info(
+                        "local_extractor_raw_fields invoice_id=%s template=%s fields=%s",
+                        inv_id, _template_type,
+                        {k: _local_raw.get(k, "") for k in _RAW_LOG_KEYS},
+                    )
                     _candidate = map_local_to_gemini_format(
                         _local_raw, _local_text, inv.get("excel", {})
                     )
@@ -573,10 +622,17 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                             extracted.get("invoice_date_iso"),
                         )
                     else:
+                        # Log the mapped candidate so it's clear which field is blank/invalid.
+                        _CAND_LOG_KEYS = (
+                            "remitter_name", "remitter_address", "remitter_country_text",
+                            "beneficiary_name", "beneficiary_address", "beneficiary_country_text",
+                            "invoice_number", "invoice_date_iso", "amount", "currency_short",
+                        )
                         logger.info(
                             "local_extraction_incomplete invoice_id=%s template=%s "
-                            "— falling back to Gemini",
+                            "candidate_fields=%s — falling back to Gemini",
                             inv_id, _template_type,
+                            {k: _candidate.get(k, "") for k in _CAND_LOG_KEYS},
                         )
             except Exception as _local_exc:
                 logger.warning(
@@ -774,6 +830,21 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                     "remitter_prefilled_from_default invoice_id=%s gemini_name=%r remitter=%s",
                     inv_id, gemini_remitter, extracted["remitter_name"],
                 )
+
+        # Log every extracted field before state is built — one-stop debug snapshot.
+        _EXTRACT_LOG_KEYS = (
+            "remitter_name", "remitter_address", "remitter_country_text",
+            "beneficiary_name", "beneficiary_address", "beneficiary_country_text",
+            "invoice_number", "invoice_date_iso", "invoice_date_raw",
+            "amount", "currency_short",
+            "nature_of_remittance", "purpose_group", "purpose_code",
+        )
+        logger.info(
+            "extraction_final_fields invoice_id=%s source=%s fields=%s",
+            inv_id,
+            "local" if _use_local else "gemini",
+            {k: extracted.get(k, "") for k in _EXTRACT_LOG_KEYS},
+        )
 
         # Build state and recompute
         state = build_invoice_state(inv_id, file_name, extracted, config)
@@ -1854,7 +1925,21 @@ def render_single_invoice_page() -> None:
                     "BasisDeterTax", "RateTdsADtaa", "DednDateTds",
                 )
                 before = tuple(str(form.get(k) or "") for k in _snap_keys)
-                new_state = recompute_invoice(new_state)
+                # Only call recompute when the inputs that drive it have actually
+                # changed.  Streamlit re-executes the full script on every
+                # interaction; without this guard, recompute_invoice fires 3-4×
+                # after a single st.rerun() even when nothing changed — wasting
+                # CPU and polluting logs with redundant recompute_tds_skipped
+                # warnings.  Accuracy is unaffected: recompute is idempotent, so
+                # skipping it when inputs are unchanged produces the same result.
+                _cur_sig = _recompute_input_sig(new_state)
+                _last_sig = (new_state.get("meta") or {}).get("_last_recompute_input_sig")
+                if _cur_sig != _last_sig:
+                    new_state = recompute_invoice(new_state)
+                    new_state.setdefault("meta", {})["_last_recompute_input_sig"] = _cur_sig
+                    logger.debug("recompute_invoice_ran invoice_id=%s", inv_id)
+                else:
+                    logger.debug("recompute_invoice_skipped invoice_id=%s reason=inputs_unchanged", inv_id)
                 form_after: Dict[str, Any] = new_state.get("form", {}) if isinstance(new_state, dict) else {}
                 after = tuple(str(form_after.get(k) or "") for k in _snap_keys)
                 inv["state"] = new_state
