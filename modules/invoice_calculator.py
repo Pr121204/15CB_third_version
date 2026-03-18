@@ -95,6 +95,50 @@ def _round_to_int(value: float) -> int:
         return int(round(value))
 
 
+def _fmt_fcy(n: Optional[float]) -> str:
+    """Format a foreign currency amount to exactly 2 decimal places (ROUND_HALF_UP)."""
+    if n is None:
+        return ""
+    try:
+        return str(Decimal(str(n)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError):
+        return f"{float(n):.2f}"
+
+
+def _fmt_inr(n: Optional[float]) -> str:
+    """Format an INR amount to integer (no decimals)."""
+    if n is None:
+        return ""
+    return str(_round_to_int(float(n)))
+
+
+# Fields rounded to 2 dp at the final output step (FCY amounts).
+_FCY_AMOUNT_FIELDS = ("AmtPayForgnRem", "ActlAmtTdsForgn", "AmtPayForgnTds")
+# Fields rounded to integer at the final output step (INR amounts).
+_INR_AMOUNT_FIELDS = (
+    "AmtPayIndRem", "AmtPayIndianTds",
+    "AmtIncChrgIt", "TaxLiablIt",
+    "TaxIncDtaa", "TaxLiablDtaa",
+)
+
+
+def _apply_amount_rounding(d: Dict[str, str]) -> None:
+    """Round amount fields in-place: FCY → 2 dp, INR → integer.
+
+    Called as the very last step of recompute_invoice() and
+    invoice_state_to_xml_fields() so all intermediate calculations
+    run at full precision.
+    """
+    for key in _FCY_AMOUNT_FIELDS:
+        val = _to_float(str(d.get(key) or ""))
+        if val is not None:
+            d[key] = _fmt_fcy(val)
+    for key in _INR_AMOUNT_FIELDS:
+        val = _to_float(str(d.get(key) or ""))
+        if val is not None:
+            d[key] = _fmt_inr(val)
+
+
 def _is_integer_rate(value: float | None) -> bool:
     if value is None:
         return False
@@ -620,6 +664,19 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
         if override_key in form:
             form[field] = str(form[override_key])
 
+    # NON_TDS enforcement: actual remittance in foreign currency must always equal
+    # the invoice amount exactly — no TDS is deducted so nothing is withheld.
+    # This re-locks ActlAmtTdsForgn after the UI-override loop above, so any
+    # accidental manual edit to Section 12 in non-TDS mode cannot create a
+    # discrepancy between AmtPayForgnRem and ActlAmtTdsForgn.
+    if mode == MODE_NON_TDS:
+        form["ActlAmtTdsForgn"] = _fmt_num(fcy)
+
+    # Final step: round FCY amounts to 2 dp and INR amounts to integer.
+    # All intermediate calculations above run at full precision; rounding
+    # only happens here so there is no cascading error mid-calculation.
+    _apply_amount_rounding(form)
+
     return state
 
 def _split_at_boundary(text: str, max_len: int) -> tuple:
@@ -858,6 +915,12 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
         if not str(out.get("ActlAmtTdsForgn") or "").strip():
             net_fcy = max(gross_fcy - tds_fcy, 0.0)
             out["ActlAmtTdsForgn"] = _fmt_num(net_fcy)
+    elif mode == MODE_NON_TDS and gross_fcy is not None:
+        # Non-TDS: no withholding is applied, so the actual remittance in foreign
+        # currency is always exactly the invoice amount.  Enforce this unconditionally
+        # so that any stale UI value or manual edit cannot cause a discrepancy in the
+        # generated XML.
+        out["ActlAmtTdsForgn"] = _fmt_num(gross_fcy)
 
     tax_resid_cert = str(out.get("TaxResidCert") or "N").strip().upper()
     if mode == MODE_TDS:
@@ -913,6 +976,11 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
         out["AmtIncChrgIt"] = ""
         out["TaxLiablIt"] = ""
         out["BasisDeterTax"] = ""
+
+    # Final step: enforce FCY → 2 dp and INR → integer in XML output.
+    # This covers any amounts derived within this function (e.g. ActlAmtTdsForgn
+    # computed from AmtPayForgnRem − AmtPayForgnTds) that bypass recompute_invoice.
+    _apply_amount_rounding(out)
 
     out = _redistribute_address_overflow(out)
     return _enforce_field_limits(out)

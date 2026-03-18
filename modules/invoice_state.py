@@ -18,6 +18,7 @@ from modules.master_lookups import (
     infer_country_from_beneficiary_name,
     load_nature_options,
     load_purpose_grouped,
+    lookup_remitter_address,
     match_remitter,
     resolve_bank_code,
     resolve_country_code,
@@ -517,6 +518,18 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
     form["NameRemitteeInput"] = cleaned_beneficiary_name
     form["NameRemittee"] = cleaned_beneficiary_name
     form["RemitterAddress"] = str(extracted.get("remitter_address") or "").strip()
+    # If extraction didn't return a remitter address, look it up from the
+    # indian_companies master (which holds known Bosch entity addresses).
+    if not form["RemitterAddress"]:
+        _master_addr = lookup_remitter_address(form["NameRemitterInput"])
+        if _master_addr:
+            form["RemitterAddress"] = _master_addr
+            extracted["remitter_address"] = _master_addr
+            logger.info(
+                "remitter_address_fallback_applied invoice_id=%s remitter=%r",
+                invoice_id,
+                form["NameRemitterInput"],
+            )
     # For the special EUR Excel format the invoice number is supplied directly
     # in the "Invoice No" column; use it in preference to the AI-extracted value.
     excel_invoice_no = str(config.get("excel_invoice_no") or "").strip()
@@ -784,6 +797,9 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
             )
 
     # --- Improved Nature/Purpose selection (CA-style keyword classifier) ---
+    source_nature = "missing"
+    source_group = "missing"
+    source_code = "missing"
     try:
         from modules.remittance_classifier import classify_remittance
 
@@ -931,6 +947,34 @@ def build_invoice_state(invoice_id: str, file_name: str, extracted: Dict[str, st
                 else:
                     continue
                 break
+
+    # --- Final classification fallback: always fill the three fields ---
+    # If all prior attempts left any field blank, fall back to:
+    #   nature  = Fees for Technical Services (FTS)  [code 16.21]
+    #   group   = Other Business Services
+    #   purpose = S1023
+    _fallback_applied = False
+    if not form.get("NatureRemCategory") or not str(extracted.get("nature_of_remittance") or "").strip():
+        form["NatureRemCategory"] = "16.21"
+        extracted["nature_of_remittance"] = "FEES FOR TECHNICAL SERVICES/ FEES FOR INCLUDED SERVICES"
+        _fallback_applied = True
+    if not form.get("_purpose_code") or not str(extracted.get("purpose_code") or "").strip():
+        form["_purpose_group"] = "Other Business Services"
+        form["_purpose_code"] = "S1023"
+        form["RevPurCategory"] = "RB-10.1"
+        form["RevPurCode"] = "RB-10.1-S1023"
+        extracted["purpose_code"] = "S1023"
+        extracted["purpose_group"] = "Other Business Services"
+        _fallback_applied = True
+    if _fallback_applied:
+        logger.warning(
+            "classification_default_fallback invoice_id=%s reason=all_classifiers_failed "
+            "nature=%r purpose_code=%r purpose_group=%r",
+            invoice_id,
+            extracted.get("nature_of_remittance"),
+            extracted.get("purpose_code"),
+            extracted.get("purpose_group"),
+        )
 
     rem = match_remitter(extracted.get("remitter_name", ""))
     if rem:

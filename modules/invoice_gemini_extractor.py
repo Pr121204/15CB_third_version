@@ -1225,12 +1225,15 @@ def _is_valid_postal_address(address: str, beneficiary_name: str = "") -> bool:
     # Red flag 2: ends with a company/division suffix
     ends_corporate = bool(_COMPANY_TAIL_RE.search(addr_upper))
 
-    # Red flag 3: address is essentially a subset of the beneficiary name
+    # Red flag 3: address text is wholly contained in the beneficiary name —
+    # meaning it's just the company name itself with no postal content.
+    # Do NOT flag when the name is contained in the address: it is perfectly
+    # normal for a postal address to begin with the company's own name followed
+    # by the street line, e.g.:
+    #   "Robert Bosch GmbH, Robert-Bosch-Platz 1, 70839 Gerlingen, Germany"
     name_upper = " ".join(str(beneficiary_name or "").upper().split())
     addr_norm = " ".join(addr_upper.split())
-    is_name_subset = bool(name_upper and addr_norm and (
-        addr_norm in name_upper or name_upper in addr_norm
-    ))
+    is_name_subset = bool(name_upper and addr_norm and addr_norm in name_upper)
 
     if (not has_digit and ends_corporate) or is_name_subset:
         return False
@@ -1550,16 +1553,34 @@ def _enrich_addresses_from_text(text: str, extracted: Dict[str, str]) -> Dict[st
             out["beneficiary_country_text"] = detected_country
             logger.info("country_signal_detected country=%s", detected_country)
 
-    # Remitter (Indian) address pattern from ship/services block with 6-digit PIN.
+    # Remitter (Indian) address: look for an address block near "Bill To" /
+    # "Invoice To" / "Customer" labels, then fall back to any Indian-city + PIN.
+    _INDIAN_CITIES_RE = (
+        r"(?:Bangalore|Bengaluru|Mumbai|Bombay|Delhi|New\s*Delhi|Chennai|Madras|"
+        r"Hyderabad|Pune|Kolkata|Calcutta|Ahmedabad|Gurugram|Gurgaon|Noida|"
+        r"Navi\s*Mumbai|Surat|Jaipur|Lucknow|Kochi|Cochin|Chandigarh|Coimbatore|"
+        r"Indore|Nagpur|Visakhapatnam|Vadodara|Bhopal)"
+    )
     if not str(out.get("remitter_address") or "").strip():
+        # 1. Near "Bill To" / "Invoice To" / "Customer" labels (any city with PIN)
         m_india = re.search(
-            r"(Cyber park[^\n,]*,\s*No\.\s*76,\s*77[^\n]*?(?:Bangalore|Bengaluru)[^\n]*)",
+            r"(?:Bill\s*To|Invoice\s*To|Billed\s*To|Invoiced\s*To|Customer|Client"
+            r"|Remitter|Payer|Buyer)\s*[:\-]?\s*\n?"
+            r"((?:[^\n]+\n?){1,5}?\b\d{6}\b)",
             t,
             flags=re.IGNORECASE,
         )
+        # 2. Specific Bangalore landmark pattern (legacy)
         if not m_india:
             m_india = re.search(
-                r"([A-Za-z0-9,\-\s]{10,120}\b(?:Bangalore|Bengaluru)\b[^\n]{0,40}\b\d{6}\b)",
+                r"(Cyber park[^\n,]*,\s*No\.\s*76,\s*77[^\n]*?(?:Bangalore|Bengaluru)[^\n]*)",
+                t,
+                flags=re.IGNORECASE,
+            )
+        # 3. Any Indian city with a 6-digit PIN code
+        if not m_india:
+            m_india = re.search(
+                rf"([A-Za-z0-9,\-\s]{{10,150}}\b{_INDIAN_CITIES_RE}\b[^\n]{{0,60}}\b\d{{6}}\b)",
                 t,
                 flags=re.IGNORECASE,
             )

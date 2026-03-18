@@ -347,6 +347,39 @@ def resolve_bank_code(bank_name: str) -> str:
     return load_bank_code_map().get(_normalize(bank_name), "")
 
 
+def lookup_remitter_address(remitter_name: str) -> str:
+    """Return a known address for *remitter_name* from master_data indian_companies.
+
+    Returns the ``new_address`` if populated, else ``address``, else ``""``
+    when the company is not in the master list.
+    """
+    if not remitter_name:
+        return ""
+    q = _normalize(remitter_name)
+    if not q:
+        return ""
+    try:
+        from modules.master_data import load_master
+        companies = load_master().get("indian_companies", [])
+        for entry in companies:
+            if not isinstance(entry, dict):
+                continue
+            n = _normalize(str(entry.get("name") or ""))
+            if not n:
+                continue
+            if q == n or q in n or n in q:
+                addr = str(entry.get("new_address") or entry.get("address") or "").strip()
+                if addr:
+                    logger.info(
+                        "remitter_address_from_master remitter=%r matched=%r",
+                        remitter_name, entry.get("name"),
+                    )
+                    return addr
+    except Exception:
+        logger.exception("lookup_remitter_address_failed remitter=%r", remitter_name)
+    return ""
+
+
 def resolve_country_code(country: str) -> str:
     key = _normalize(country)
     code = load_country_code_map().get(key, "")

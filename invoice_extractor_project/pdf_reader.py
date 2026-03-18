@@ -44,11 +44,22 @@ def extract_pdf_data(pdf_path):
     return text, words
 
 
+def is_text_pdf(pdf_path, min_chars=_OCR_THRESHOLD):
+    """Return True if the PDF has sufficient embedded text (not a scanned image).
+
+    Use this to decide whether to run the local regex extractors.  Scanned
+    (image-only) PDFs should bypass the local extractor and go directly to
+    Gemini vision, which is faster and more accurate for such files.
+    """
+    text, _ = extract_pdf_data(pdf_path)
+    return len(text.strip()) >= min_chars
+
+
 def extract_pdf_data_with_ocr_fallback(pdf_path, min_chars=_OCR_THRESHOLD):
     text, words = extract_pdf_data(pdf_path)
     if len(text.strip()) >= min_chars:
         return text, words   # normal path, no OCR needed
-    
+
     # Fallback: OCR
     print("OCR fallback triggered")
     return _ocr_pdf(pdf_path)

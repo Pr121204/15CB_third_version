@@ -534,6 +534,7 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
     try:
         extracted: Dict[str, Any] = {}
         _use_local = False
+        _local_text = ""   # text extracted by local extractor; reused below to avoid double read
 
         # ── Local extraction (no Gemini) for known Bosch templates ───────────
         # Tries fast, deterministic regex/PDF extraction via extractor.py.
@@ -590,14 +591,22 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                 inv_id, _template_type,
             )
         elif file_name.lower().endswith(".pdf"):
-            try:
-                _pt = extract_text_from_pdf(io.BytesIO(file_bytes), return_pages=True)
-                pages_text: List[str] = list(_pt) if isinstance(_pt, list) else []
-                text = "\n".join(pages_text) if pages_text else ""
-            except Exception:
-                logger.exception("pdf_text_extraction_failed file=%s", file_name)
-                pages_text = []
-                text = ""
+            # Reuse text already extracted by the local extractor when available —
+            # avoids opening the PDF with pdfplumber a second time.
+            # _local_text is non-empty only when the local extractor successfully
+            # read a native text layer (it is "" for scanned PDFs and on errors).
+            if _local_text:
+                text = _local_text
+                pages_text: List[str] = [_local_text]  # single-element list is enough for amount override
+            else:
+                try:
+                    _pt = extract_text_from_pdf(io.BytesIO(file_bytes), return_pages=True)
+                    pages_text = list(_pt) if isinstance(_pt, list) else []
+                    text = "\n".join(pages_text) if pages_text else ""
+                except Exception:
+                    logger.exception("pdf_text_extraction_failed file=%s", file_name)
+                    pages_text = []
+                    text = ""
             text_len = len(text.strip())
             route_mode = "text" if text_len >= TEXT_EXTRACTION_MIN_THRESHOLD else "image_multi"
             logger.info(
@@ -714,28 +723,28 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
                         source_mode="pdf_image_multi",
                     )
                 else:
-                    # Final fallback: treat as plain image
+                    # Final fallback: treat as plain image.
+                    # OCR is not run here — the classifier's synthetic-probe fallback
+                    # (invoice_state.py) handles empty _raw_invoice_text using the
+                    # fields Gemini already extracted.
                     logger.info("GEMINI_CALLED invoice_id=%s route=pdf_image_single_fallback", inv_id)
                     try:
                         extracted = extract_invoice_core_fields_from_image(file_bytes, invoice_id=inv_id, excel_data=inv.get("excel", {}))
-                        text = extract_text_from_image_file(file_bytes) or ""
                     except Exception:
-                        logger.exception("pdf_image_ocr_fallback_failed file=%s", file_name)
+                        logger.exception("pdf_image_single_fallback_failed file=%s", file_name)
                         extracted = {}
-                        text = ""
-                    if not extracted.get("_raw_invoice_text"):
-                        extracted["_raw_invoice_text"] = text
         else:
-            # Image uploads (jpg/png)
+            # Image uploads (jpg/png).
+            # OCR is not run after Gemini vision — Gemini already extracted all
+            # fields including remittance classification.  The classifier's
+            # synthetic-probe fallback (invoice_state.py) handles empty
+            # _raw_invoice_text using the fields Gemini returned.
             logger.info("GEMINI_CALLED invoice_id=%s route=image_upload", inv_id)
-            extracted = extract_invoice_core_fields_from_image(file_bytes, invoice_id=inv_id, excel_data=inv.get("excel", {}))
             try:
-                raw_text = extract_text_from_image_file(file_bytes) or ""
+                extracted = extract_invoice_core_fields_from_image(file_bytes, invoice_id=inv_id, excel_data=inv.get("excel", {}))
             except Exception:
-                logger.exception("image_ocr_fallback_failed file=%s", file_name)
-                raw_text = ""
-            if not extracted.get("_raw_invoice_text"):
-                extracted["_raw_invoice_text"] = raw_text
+                logger.exception("image_upload_gemini_failed file=%s", file_name)
+                extracted = {}
         # Always ensure raw text exists
         extracted.setdefault("_raw_invoice_text", "")
 
@@ -754,15 +763,17 @@ def _process_invoice_worker(inv: dict, inv_id: str, file_bytes: bytes, file_name
         # from scanned PDFs — e.g. "INNOVARE..." instead of the actual Bosch entity).
         from modules.master_lookups import load_bank_details, match_remitter
         bank_entries = load_bank_details()
-        gemini_remitter = extracted.get("remitter_name", "")
-        remitter_matched = bool(gemini_remitter and match_remitter(gemini_remitter))
-        if (not gemini_remitter or not remitter_matched) and len(bank_entries) == 1:
-            default_rem = bank_entries[0]
-            extracted["remitter_name"] = default_rem.get("name", "")
-            logger.info(
-                "remitter_prefilled_from_default invoice_id=%s gemini_name=%r remitter=%s",
-                inv_id, gemini_remitter, extracted["remitter_name"],
-            )
+        # match_remitter is only useful when there is exactly one bank entry to
+        # prefill from.  Skip the string-matching work entirely for multi-bank
+        # or zero-bank configurations where the prefill can never fire.
+        if len(bank_entries) == 1:
+            gemini_remitter = extracted.get("remitter_name", "")
+            if not gemini_remitter or not match_remitter(gemini_remitter):
+                extracted["remitter_name"] = bank_entries[0].get("name", "")
+                logger.info(
+                    "remitter_prefilled_from_default invoice_id=%s gemini_name=%r remitter=%s",
+                    inv_id, gemini_remitter, extracted["remitter_name"],
+                )
 
         # Build state and recompute
         state = build_invoice_state(inv_id, file_name, extracted, config)

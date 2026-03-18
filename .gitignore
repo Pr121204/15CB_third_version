@@ -1,13 +1,85 @@
+# ── Secrets & environment ──────────────────────────────────────────────────
 .env
-venv/
+.streamlit/secrets.toml
+
+# ── Python runtime artifacts ───────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+
+# Editor temp files created during development (e.g. by Claude Code Edit tool)
+*.tmp.*
+*.tmp
+
+# ── Virtual environment ────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Build & packaging ──────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+.eggs/
+*.egg
+MANIFEST
+
+# ── Test & coverage artifacts ──────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+tests/
+tests_chatgpt/
+tests_claude/
+
+# ── IDE / editor settings ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS-generated files ─────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── Runtime data & logs ────────────────────────────────────────────────────
 data/input/
 data/output/
 data/logs/
-.streamlit/secrets.toml
+*.log
+
+# ── Claude Code session files ──────────────────────────────────────────────
 .claude/
-tests_chatgpt/
-tests_claude/
-tests/
-tests/test_invoice_calculator.py
+
+# ── Development-only scripts (not needed for the app to run) ───────────────
+# Prompt-patching and code-refactoring utilities
+update_prompts.py
+scripts/
+
+# Scratch / verification scripts created during development
+tmp/
+
+# ── Legacy / superseded files ──────────────────────────────────────────────
+# UI.py was superseded by modules/batch_form_ui.py; constants were copied
+# into modules/ui_reference_options.py
+UI.py
+
+# lookups/ is a duplicate of data/master/ and is not imported by the app
+lookups/
+
+# debug helper inside invoice_extractor_project (not imported by app)
+invoice_extractor_project/debug_amount.py
+
+# VS Code temp runner file
+tempCodeRunnerFile.python
