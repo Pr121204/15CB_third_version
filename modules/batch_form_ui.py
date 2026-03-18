@@ -1926,7 +1926,9 @@ def render_invoice_tab(state: Dict[str, object], *, show_header: bool = True, is
         fallback_date = str(preview_form_after_9.get("DednDateTds") or base_date_val) if is_tds_mode else ""
         key_dedn_date = f"{invoice_id}_13_dedn_date"
         if "_ui_override_sec13_DednDateTds" not in form:
-            if key_dedn_date not in st.session_state or form.get("DednDateTds") != fallback_date:
+            # Keep widget state aligned with computed fallback when there is no
+            # manual override. This avoids stale/blank values surviving mode/rate toggles.
+            if key_dedn_date not in st.session_state or str(st.session_state.get(key_dedn_date) or "") != fallback_date:
                 st.session_state[key_dedn_date] = fallback_date
         val_date = str(form.get("_ui_override_sec13_DednDateTds", fallback_date))
 

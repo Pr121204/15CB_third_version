@@ -145,7 +145,7 @@ MODE_TDS = "TDS"
 MODE_NON_TDS = "NON_TDS"
 
 FIELD_MAX_LENGTH = {
-    "NameRemitter": 120,
+    "NameRemitter": 125,
     "NameRemittee": 120,
     "RemitteePremisesBuildingVillage": 50,
     "RemitteeFlatDoorBuilding": 50,
