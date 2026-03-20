@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
-from typing import Dict, Optional
+from typing import Dict, Optional, Any, cast
 
 from modules.form15cb_constants import (
     ASSESSMENT_YEAR,
@@ -197,6 +198,22 @@ def get_effective_it_rate(rate: float | None = None) -> tuple[float, str]:
     return rate, basis
 
 
+def _format_basis_rate_text(rate: Decimal | float | None) -> str:
+    """Render basis-text percentages using the same display style as the IT Act selector."""
+    parsed_rate = _to_float(str(rate or ""))
+    if parsed_rate is None:
+        return ""
+    if parsed_rate == 20.80:
+        return "20.80"
+    if parsed_rate == 21.22:
+        return "21.22"
+    if parsed_rate == 21.84:
+        return "21.84"
+    if parsed_rate == 21.216:
+        return "21.216"
+    return _fmt_num(parsed_rate)
+
+
 def apply_non_tds_reason_sync(fields: dict) -> dict:
     """Keep NatureRemDtaa, RelArtDetlDDtaa, and ReasonNot in sync for NON_TDS.
 
@@ -239,17 +256,183 @@ def apply_non_tds_reason_sync(fields: dict) -> dict:
     return fields
 
 
+@dataclass(frozen=True)
+class TaxComputationInput:
+    invoice_fcy: Decimal
+    exchange_rate: Decimal
+    it_rate: Decimal
+    dtaa_rate: Optional[Decimal]
+    is_gross_up: bool
+    is_tds: bool
+    basis_mode: str  # "dtaa" or "it_act_2080"
+
+
+@dataclass(frozen=True)
+class TaxComputationResult:
+    gross_fcy: Decimal
+    gross_inr: Decimal
+    tax_fcy: Decimal
+    tax_inr: Decimal
+    net_fcy: Decimal
+    net_inr: Decimal
+    it_liability_fcy: Decimal
+    it_liability_inr: Decimal
+    dtaa_liability_inr: Decimal
+    applied_rate: Decimal
+    dtaa_claimed: bool
+    basis_text: str
+    is_tds: bool
+
+
+def calculate_taxes(inp: TaxComputationInput) -> TaxComputationResult:
+    """Pure idempotent function to compute all tax permutations mathematically exactly in FCY."""
+    # Local assignments for type checker narrowing
+    dtaa_rate_val = inp.dtaa_rate
+    it_rate_val = inp.it_rate
+    
+    # 1. Determine applied rates and DTAA claim status
+    dtaa_claimed = False
+    applied_rate = it_rate_val
+    if inp.basis_mode == "dtaa" and dtaa_rate_val is not None:
+        if inp.is_tds:
+            dtaa_claimed = _is_integer_rate(float(dtaa_rate_val)) and dtaa_rate_val <= it_rate_val
+            applied_rate = dtaa_rate_val if dtaa_claimed else it_rate_val
+        else:
+            applied_rate = dtaa_rate_val
+
+    # 2. Perform Precise Full-Precision Pipeline
+    fx = inp.exchange_rate
+
+    if not inp.is_tds:
+        net_fcy_precise = inp.invoice_fcy
+        net_inr_precise = net_fcy_precise * fx
+        
+        gross_fcy_precise = net_fcy_precise
+        gross_inr_precise = net_inr_precise
+
+        tax_fcy_precise = Decimal("0.00")
+        tax_inr_precise = Decimal("0.00")
+
+        it_liability_inr_precise = gross_inr_precise * it_rate_val / Decimal("100")
+        dtaa_liability_inr_precise = Decimal("0.00")
+    
+    elif inp.is_gross_up:
+        if applied_rate >= Decimal("100"):
+            raise ValueError("Tax rate cannot be >= 100% for gross-up.")
+        
+        net_fcy_precise = inp.invoice_fcy
+        net_inr_precise = net_fcy_precise * fx
+        
+        gross_inr_precise = net_inr_precise / (Decimal("1") - (applied_rate / Decimal("100")))
+        gross_fcy_precise = net_fcy_precise / (Decimal("1") - (applied_rate / Decimal("100")))
+        
+        tax_inr_precise = gross_inr_precise - net_inr_precise
+        tax_fcy_precise = gross_fcy_precise - net_fcy_precise
+
+        it_liability_inr_precise = gross_inr_precise * it_rate_val / Decimal("100")
+        dtaa_liability_inr_precise = tax_inr_precise if dtaa_claimed else Decimal("0.00")
+    
+    else:  # Normal TDS deduction
+        gross_fcy_precise = inp.invoice_fcy
+        gross_inr_precise = gross_fcy_precise * fx
+        
+        tax_inr_precise = gross_inr_precise * (applied_rate / Decimal("100"))
+        tax_fcy_precise = gross_fcy_precise * (applied_rate / Decimal("100"))
+        
+        net_inr_precise = gross_inr_precise - tax_inr_precise
+        net_fcy_precise = gross_fcy_precise - tax_fcy_precise
+
+        it_liability_inr_precise = gross_inr_precise * it_rate_val / Decimal("100")
+        dtaa_liability_inr_precise = tax_inr_precise if dtaa_claimed else Decimal("0.00")
+
+    # 3. Final Step Only - Absolute Single-Point Quantization
+    # User's explicit pipeline target: "Round ONLY here"
+    
+    # 0 Decimal Places (Nearest Integer) for INR values
+    gross_inr = gross_inr_precise.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    tax_inr = tax_inr_precise.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    
+    # Preserve additive/subtractive accuracy on integers: gross - tax = net
+    net_inr = gross_inr - tax_inr
+    
+    it_liability_inr = it_liability_inr_precise.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    dtaa_liability_inr = dtaa_liability_inr_precise.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+
+    # 2 Decimal Places for FCY values
+    # Following user's direct rule: `final_tax_fcy = round(tax_inr_precise / fx, 2)` or equivalent exact
+    # We round from the exact FCY representations equivalently:
+    gross_fcy_rounded = gross_fcy_precise.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    tax_fcy_rounded = tax_fcy_precise.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    net_fcy_rounded = net_fcy_precise.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    
+    # Force exact 2dp invariant structurally against standard floating anomalies
+    if inp.is_gross_up:
+        gross_fcy_rounded = net_fcy_rounded + tax_fcy_rounded
+    else:
+        net_fcy_rounded = gross_fcy_rounded - tax_fcy_rounded
+        
+    it_liability_fcy_rounded = (it_liability_inr_precise / fx if fx else Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    dtaa_liability_fcy_rounded = (dtaa_liability_inr_precise / fx if fx else Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    # 6. Basis text logic
+    if inp.is_tds and inp.is_gross_up:
+        _, basis_text_raw = get_effective_it_rate(float(inp.it_rate))
+        basis_text = f"{basis_text_raw} GROSS-UP APPLIED (TAX BORNE BY REMITTER).".strip()
+    elif inp.basis_mode == "it_act_2080" or (not dtaa_claimed and inp.is_tds):
+        _, basis_text = get_effective_it_rate(float(inp.it_rate))
+    else:
+        if not inp.is_tds and inp.basis_mode == "it_act_2080":
+            basis_text = IT_ACT_BASIS.get(
+                float(inp.it_rate),
+                f"GROSS AMOUNT OF REMITTANCE IS CONSIDERED AS TAXABLE INCOME AND TAX LIABILITY IS CALCULATED AT {_fmt_num(float(inp.it_rate))} PERCENTAGE OF ABOVE."
+            )
+        elif not inp.is_tds and inp.dtaa_rate is None:
+            basis_text = IT_ACT_BASIS.get(
+                float(inp.it_rate),
+                f"GROSS AMOUNT OF REMITTANCE IS CONSIDERED AS TAXABLE INCOME AND TAX LIABILITY IS CALCULATED AT {_fmt_num(float(inp.it_rate))} PERCENTAGE OF ABOVE."
+            )
+        else:
+            basis_text = (
+                f"GROSS AMOUNT OF REMITTANCE IS CONSIDERED AS TAXABLE INCOME "
+                f"AND TAX LIABILITY IS CALCULATED AT {_format_basis_rate_text(inp.it_rate)} "
+                f"PERCENTAGE OF ABOVE AS PER APPLICABLE DTAA."
+            )
+
+    return TaxComputationResult(
+        gross_fcy=gross_fcy_rounded,
+        gross_inr=gross_inr,
+        tax_fcy=tax_fcy_rounded,
+        tax_inr=tax_inr,
+        net_fcy=net_fcy_rounded,
+        net_inr=net_inr,
+        it_liability_fcy=it_liability_fcy_rounded,
+        it_liability_inr=it_liability_inr,
+        dtaa_liability_inr=dtaa_liability_inr,
+        applied_rate=applied_rate,
+        dtaa_claimed=dtaa_claimed,
+        basis_text=basis_text,
+        is_tds=inp.is_tds,
+    )
+
+
 def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
-    meta = state.setdefault("meta", {})
-    extracted = state.setdefault("extracted", {})
-    form = state.setdefault("form", {})
-    resolved = state.setdefault("resolved", {})
-    computed = state.setdefault("computed", {})
+    meta = cast(Dict[str, Any], state.setdefault("meta", {}))
+    extracted = cast(Dict[str, Any], state.setdefault("extracted", {}))
+    form = cast(Dict[str, Any], state.setdefault("form", {}))
+    resolved = cast(Dict[str, Any], state.setdefault("resolved", {}))
+    computed = cast(Dict[str, Any], state.setdefault("computed", {}))
 
     mode = str(meta.get("mode") or MODE_TDS)
     invoice_id = str(meta.get("invoice_id") or "")
     exchange_rate = _to_float(str(meta.get("exchange_rate") or "")) or 0.0
-    fcy = _to_float(str(form.get("AmtPayForgnRem") or extracted.get("amount") or "")) or 0.0
+
+    # Source of truth for the base invoice amount: prioritize extracted (paper) value.
+    # We use this as a 'frozen' anchor for all tax derivations (VAT, TDS, Gross-up)
+    # to prevent recursive feedback loops if AmtPayForgnRem is grossed up in the UI.
+    _fcy_extracted = _to_float(str(extracted.get("amount") or "")) or 0.0
+    _fcy_ui = _to_float(str(form.get("AmtPayForgnRem") or "")) or 0.0
+    fcy = _fcy_extracted if _fcy_extracted > 0 else _fcy_ui
+    
     inr_exact_calc = fcy * exchange_rate
     inr_calc = float(_round_to_int(inr_exact_calc))
     manual_inr_override = str(form.get("_ui_inr_manual_override") or "").strip().upper() in {"1", "Y", "YES", "TRUE"}
@@ -307,22 +490,14 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
             "raw_net_amount=%r — treating as standard case",
             invoice_id, _net_fcy_raw,
         )
+    # VAT detection strictly uses the un-grossed paper base (fcy) as the anchor.
     is_vat_case = bool(net_fcy > 0 and fcy > 0 and net_fcy < fcy)
 
     if is_vat_case:
-        chargeable_inr_exact = Decimal(str(net_fcy)) * exchange_rate_dec
-        chargeable_inr_dec = chargeable_inr_exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         logger.info(
-            "vat_case_detected invoice_id=%s net_fcy=%s total_fcy=%s chargeable_inr=%s",
-            invoice_id, _fmt_num(net_fcy), _fmt_num(fcy), chargeable_inr_dec,
+            "vat_case_detected invoice_id=%s net_fcy=%s total_fcy=%s",
+            invoice_id, _fmt_num(net_fcy), _fmt_num(fcy),
         )
-    else:
-        chargeable_inr_exact = invoice_inr_exact  # full invoice amount (exact Decimal)
-        chargeable_inr_dec = invoice_inr           # full invoice amount (rounded Decimal)
-
-    # Update AmtIncChrgIt with the correct chargeable base (overrides the early default at line 281).
-    # Mode branches (TDS, NON_TDS) will further override this for their specific paths.
-    form["AmtIncChrgIt"] = _fmt_num(float(chargeable_inr_dec))
 
     logger.info(
         "recompute_start invoice_id=%s mode=%s fcy=%s inr=%s fx=%s dtaa_rate=%s",
@@ -343,155 +518,83 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
     is_gross_up = bool(meta.get("is_gross_up", False))
 
     # ── Read user-selected IT Act rate ────────────────────────────────────
-    raw_rate = _to_float(form.get("ItActRateSelected"))
-    if raw_rate not in IT_ACT_RATES:
-        selected_it_rate = IT_ACT_RATE_DEFAULT
-    else:
-        selected_it_rate = raw_rate
+    raw_rate = _to_float(str(form.get("ItActRateSelected") or ""))
+    selected_it_rate = raw_rate if raw_rate in IT_ACT_RATES else IT_ACT_RATE_DEFAULT
     form["ItActRateSelected"] = str(selected_it_rate)
 
-    # ── Calculation basis override: "20.80% (IT Act)" toggle ──────────────
-    # When user selects 20.80% IT Act as calculation basis in TDS mode,
-    # bypass DTAA and compute TDS at 20.80% instead.
+    # ── Map inputs to Pure Function format ────────────────────────────────
     non_tds_basis = str(form.get("NonTdsBasisRateMode") or "dtaa")
-    if mode == MODE_TDS and non_tds_basis == "it_act_2080":
-        selected_it_rate = 20.80
-        form["ItActRateSelected"] = "20.8"
-        form["dtaa_mode"] = "it_act"
-        # Force RateTdsSecbFlg to IT Act ("1") so RemForRoyFlg becomes "N" downstream
-        form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_IT_ACT
-
-    # --- PRIORITY 1: GROSS-UP FLOW ---
-    if mode == MODE_TDS and is_gross_up:
-        it_factor, basis_text = get_effective_it_rate(selected_it_rate)
-        it_rate_dec = Decimal(str(it_factor))
-
-        # UI calculation basis takes priority: when user selected IT Act, DTAA must
-        # not override — even in gross-up mode.
+    basis_mode = "dtaa"
+    
+    if mode == MODE_TDS:
         dtaa_mode = form.get("dtaa_mode")
-        dtaa_available = dtaa_rate_percent is not None and dtaa_mode != "it_act"
-        gross_rate_dec = Decimal(str(dtaa_rate_percent)) if dtaa_available else it_rate_dec
-
-        if gross_rate_dec < 100:
-            # Net → Gross: gross_inr = net_inr * 100 / (100 - rate)
-            gross_inr_exact = chargeable_inr_exact * Decimal("100") / (Decimal("100") - gross_rate_dec)
-            gross_inr_rounded = gross_inr_exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-
-            # TDS at gross-up rate on grossed-up INR
-            tds_inr_exact = gross_inr_rounded * gross_rate_dec / Decimal("100")
-            tds_inr_rounded = tds_inr_exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-
-            # IT Act liability at IT rate on grossed-up INR (may differ from TDS when DTAA applies)
-            it_liab_exact = gross_inr_rounded * it_rate_dec / Decimal("100")
-            it_liab_rounded = it_liab_exact.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-
-            # TDS in FCY: derived from tds_inr / fx (more accurate than gross_fcy * rate)
-            if exchange_rate_dec > 0:
-                tds_fcy = (tds_inr_exact / exchange_rate_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            else:
-                tds_fcy = Decimal("0.00")
-
-            form["AmtIncChrgIt"] = str(int(gross_inr_rounded))
-            form["TaxLiablIt"] = str(int(it_liab_rounded))
-            form["AmtPayIndianTds"] = str(int(tds_inr_rounded))
-            form["TaxPayGrossSecb"] = "Y"
-            form["AmtPayForgnTds"] = f"{tds_fcy:.2f}"
-            # In gross-up, remitter bears TDS on top of the net invoice amount.
-            # AmtPayForgnRem = GROSS (net + TDS) = total leaving India.
-            # ActlAmtTdsForgn = GROSS - TDS = net invoice = what vendor actually receives.
-            gross_fcy = (invoice_fcy + tds_fcy).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            form["AmtPayForgnRem"] = _fmt_num(float(gross_fcy))
-            form["ActlAmtTdsForgn"] = _fmt_num(float(invoice_fcy))
-            form["BasisDeterTax"] = f"{basis_text} GROSS-UP APPLIED (TAX BORNE BY REMITTER).".strip()
-            form["RateTdsSecB"] = _fmt_num(float(gross_rate_dec))
-            form["RemittanceCharIndia"] = "Y"
-
-            if dtaa_available:
-                # DTAA gross-up: populate DTAA fields with grossed-up amounts
-                form["TaxIncDtaa"] = str(int(gross_inr_rounded))
-                form["TaxLiablDtaa"] = str(int(tds_inr_rounded))
-                form["RateTdsADtaa"] = str(int(round(float(gross_rate_dec))))
-                form["OtherRemDtaa"] = "N"
-                form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_DTAA
-            else:
-                # IT Act only gross-up: clear DTAA fields
-                form["TaxIncDtaa"] = ""
-                form["TaxLiablDtaa"] = ""
-                form["RateTdsADtaa"] = ""
-                form["OtherRemDtaa"] = "N"
+        if dtaa_mode == "it_act" or str(form.get("BasisDeterTax") or "").strip() == "Act":
+            basis_mode = "it_act_2080"
+        
+        if basis_mode == "it_act_2080" or non_tds_basis == "it_act_2080":
+            # Some UI toggles enforce 20.80% explicitly when switching to IT_ACT
+            if "20.80" in str(form.get("BasisDeterTax") or "") or non_tds_basis == "it_act_2080":
+                selected_it_rate = 20.80
+                form["ItActRateSelected"] = "20.8"
+                form["dtaa_mode"] = "it_act"
                 form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_IT_ACT
+    else:
+        basis_mode = non_tds_basis
+        if basis_mode == "it_act_2080":
+            selected_it_rate = 20.80
 
-            logger.info(
-                "recompute_tds_done invoice_id=%s dtaa_claimed=%s values=%s",
-                invoice_id,
-                dtaa_available,
-                {
-                    "TaxLiablIt": form.get("TaxLiablIt", ""),
-                    "TaxIncDtaa": form.get("TaxIncDtaa", ""),
-                    "TaxLiablDtaa": form.get("TaxLiablDtaa", ""),
-                    "AmtPayForgnTds": form.get("AmtPayForgnTds", ""),
-                    "AmtPayIndianTds": form.get("AmtPayIndianTds", ""),
-                    "RateTdsSecB": form.get("RateTdsSecB", ""),
-                    "ActlAmtTdsForgn": form.get("ActlAmtTdsForgn", ""),
-                },
-            )
-
-    elif mode == MODE_TDS and (dtaa_rate_percent is not None or form.get("dtaa_mode") == "it_act"):
-        it_factor, it_basis = get_effective_it_rate(selected_it_rate)
-
-        dtaa_mode = form.get("dtaa_mode")
-        if dtaa_mode == "it_act":
-            dtaa_claimed = False
-            applied_rate_dec = Decimal(str(it_factor))
+    effective_it_rate, _ = get_effective_it_rate(selected_it_rate)
+    
+    tax_input = TaxComputationInput(
+        invoice_fcy=Decimal(str(net_fcy)) if is_vat_case else invoice_fcy, # VAT case passes down the net base
+        exchange_rate=exchange_rate_dec if exchange_rate_dec > 0 else Decimal("0.00"),
+        it_rate=Decimal(str(effective_it_rate)),
+        dtaa_rate=Decimal(str(dtaa_rate_percent)) if dtaa_rate_percent is not None else None,
+        is_gross_up=is_gross_up,
+        is_tds=(mode == MODE_TDS),
+        basis_mode=basis_mode
+    )
+    
+    # ── Execute Pure Computation ──────────────────────────────────────────
+    res = calculate_taxes(tax_input)
+    
+    # ── Map Results Back To Form (No inline math allowed) ─────────────────
+    if mode == MODE_TDS:
+        form["AmtIncChrgIt"] = str(int(res.gross_inr))
+        form["TaxLiablIt"] = str(int(res.it_liability_inr))
+        form["AmtPayIndianTds"] = str(int(res.tax_inr))
+        form["AmtPayForgnTds"] = f"{res.tax_fcy:.2f}"
+        form["ActlAmtTdsForgn"] = f"{res.net_fcy:.2f}"
+        form["BasisDeterTax"] = res.basis_text
+        form["RateTdsSecB"] = str(int(res.applied_rate)) if res.applied_rate.to_integral_value() == res.applied_rate else f"{res.applied_rate:.2f}"
+        
+        # Determine gross remittance out of India
+        form["AmtPayForgnRem"] = f"{(res.gross_fcy if is_gross_up else (invoice_fcy if is_vat_case else res.gross_fcy)):.2f}"
+        
+        if is_gross_up:
+            form["TaxPayGrossSecb"] = "Y"
+            form["RemittanceCharIndia"] = "Y"
         else:
-            dtaa_rate_dec = Decimal(str(dtaa_rate_percent))
-            it_rate_dec = Decimal(str(it_factor))
-            dtaa_claimed = _is_integer_rate(float(dtaa_rate_dec)) and dtaa_rate_dec <= it_rate_dec
-            applied_rate_dec = dtaa_rate_dec if dtaa_claimed else it_rate_dec
+            form.setdefault("RemittanceCharIndia", "Y")
 
-        it_rate_dec = Decimal(str(it_factor))
-        it_liab = chargeable_inr_dec * (it_rate_dec / Decimal("100"))
-        dtaa_liab = chargeable_inr_dec * (applied_rate_dec / Decimal("100")) if dtaa_claimed else Decimal("0")
-        # Compute TDS in INR first (integer), then derive FCY from rounded INR to avoid
-        # back-calculation drift (e.g. FCY×rate rounded ≠ INR×rate rounded / fx).
-        tds_inr_dec = chargeable_inr_dec * (applied_rate_dec / Decimal("100"))
-        tds_inr_rounded = tds_inr_dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-        if exchange_rate_dec > 0:
-            tds_fcy_dec = (tds_inr_rounded / exchange_rate_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        else:
-            tds_fcy_dec = Decimal("0.00")
-        actual_fcy = (invoice_fcy - tds_fcy_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-        # INR tax amounts should be whole rupees (rounded)
-        form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(chargeable_inr_dec)))
-        form["TaxLiablIt"] = _fmt_num(_round_to_int(float(it_liab)))
-        if dtaa_claimed:
-            form["TaxIncDtaa"] = _fmt_num(_round_to_int(float(chargeable_inr_dec)))
-            form["TaxLiablDtaa"] = _fmt_num(_round_to_int(float(dtaa_liab)))
-            form["RateTdsADtaa"] = str(int(round(float(applied_rate_dec))))
-            form["RateTdsSecB"] = form["RateTdsADtaa"]
+        if res.dtaa_claimed:
+            form["TaxIncDtaa"] = str(int(res.gross_inr))
+            form["TaxLiablDtaa"] = str(int(res.tax_inr))
+            form["RateTdsADtaa"] = str(int(res.applied_rate)) if res.applied_rate.to_integral_value() == res.applied_rate else f"{res.applied_rate:.2f}"
             form["OtherRemDtaa"] = "N"
             form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_DTAA
+            form["RemForRoyFlg"] = "Y"
         else:
             form["TaxIncDtaa"] = ""
             form["TaxLiablDtaa"] = ""
             form["RateTdsADtaa"] = ""
-            form["RateTdsSecB"] = _fmt_num(float(applied_rate_dec))
             form["OtherRemDtaa"] = "N"
             form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_IT_ACT
+            form["RemForRoyFlg"] = "N"
 
-        # Foreign currency TDS and actual remittance — already 2dp from computation above.
-        form["AmtPayForgnTds"] = str(tds_fcy_dec)
-        form["AmtPayIndianTds"] = str(int(tds_inr_rounded))
-        form["ActlAmtTdsForgn"] = str(actual_fcy)
-        form["RemForRoyFlg"] = "Y" if dtaa_claimed else "N"
-
-        form["BasisDeterTax"] = it_basis
-        form["RemittanceCharIndia"] = "Y"
         logger.info(
             "recompute_tds_done invoice_id=%s dtaa_claimed=%s values=%s",
-            invoice_id,
-            dtaa_claimed,
+            invoice_id, res.dtaa_claimed,
             {
                 "TaxLiablIt": form.get("TaxLiablIt", ""),
                 "TaxIncDtaa": form.get("TaxIncDtaa", ""),
@@ -502,97 +605,24 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
                 "ActlAmtTdsForgn": form.get("ActlAmtTdsForgn", ""),
             },
         )
-    elif mode == MODE_TDS and str(form.get("BasisDeterTax") or "").strip() == "Act":
-        # Income Tax Act Section 195 path – uses user-selected rate
-        effective_rate, basis_text = get_effective_it_rate(selected_it_rate)
-        tax_liable_it = _round_to_int(float(chargeable_inr_dec) * (effective_rate / 100.0))
-        tax_fcy = float(tax_liable_it) / exchange_rate if exchange_rate else 0.0
-        
-        form["TaxLiablIt"] = _fmt_num(tax_liable_it)
-        form["BasisDeterTax"] = basis_text
-        form["RateTdsSecB"] = "{:.2f}".format(effective_rate)
-        form["RateTdsSecbFlg"] = RATE_TDS_SECB_FLG_IT_ACT
-        form.setdefault("RemittanceCharIndia", "Y")
-        form["OtherRemDtaa"] = "N"
-        form["RemForRoyFlg"] = "N"
-        # Clear DTAA-specific fields since we're using IT Act
-        form["TaxIncDtaa"] = ""
-        form["TaxLiablDtaa"] = ""
-        form["RateTdsADtaa"] = ""
-        form["AmtPayForgnTds"] = f"{tax_fcy:.2f}"
-        form["AmtPayIndianTds"] = str(tax_liable_it)
-        form["ActlAmtTdsForgn"] = _fmt_num(max(fcy - tax_fcy, 0.0))
-        logger.info(
-            "recompute_it_act_done invoice_id=%s rate=%s inr_amount=%s tax_liable=%s",
-            invoice_id,
-            effective_rate,
-            inr,
-            tax_liable_it,
-        )
-    elif mode == MODE_NON_TDS:
-        # -----------------------------------------------------------------------
-        # NON_TDS RECOMPUTE — non-withholding documentation flow
-        #
-        # No TDS is deducted. This branch:
-        #   • Forces TDS amounts to zero (AmtPayForgnTds, AmtPayIndianTds).
-        #   • Forces ActlAmtTdsForgn = full FCY remittance (no withholding).
-        #   • Clears RateTdsSecbFlg, RateTdsSecB, DednDateTds (stripped from XML).
-        #   • Clears DTAA article-level fields (TaxIncDtaa, TaxLiablDtaa, RateTdsADtaa).
-        #   • Preserves RemittanceCharIndia (user choice, defaults N).
-        #   • When chargeable=Y, computes IT Act doc fields for documentary record only.
-        #   • When chargeable=N, blanks all IT Act fields (not in final XML).
-        #   • 9D (OtherRemDtaa=Y, NatureRemDtaa, RelArtDetlDDtaa) is the primary path
-        #     for common non-taxable freight/reimbursement cases.
-        #   • 9A/9B/9C flags are preserved from UI, defaulting to N.
-        # -----------------------------------------------------------------------
-        # IT Act liability is computed for documentation purposes even though no TDS is withheld.
-        # Rate used depends on user toggle: DTAA rate (default) or 20.80% (IT Act).
-        non_tds_rate_mode = str(form.get("NonTdsBasisRateMode") or "dtaa")
-        if non_tds_rate_mode == "it_act_2080":
-            use_rate_dec = Decimal("20.80")
-            basis_text = IT_ACT_BASIS.get(
-                20.80,
-                "GROSS AMOUNT OF REMITTANCE IS CONSIDERED AS TAXABLE INCOME "
-                "AND TAX LIABILITY IS CALCULATED AT 20.80 PERCENTAGE OF ABOVE.",
-            )
-        else:
-            # DTAA mode: use resolved DTAA rate if available, else fall back to 20.80%
-            _doc_dtaa_rate = dtaa_rate_percent
-            if _doc_dtaa_rate is not None and _doc_dtaa_rate > 0:
-                use_rate_dec = Decimal(str(_doc_dtaa_rate))
-                basis_text = (
-                    f"GROSS AMOUNT OF REMITTANCE IS CONSIDERED AS TAXABLE INCOME "
-                    f"AND TAX LIABILITY IS CALCULATED AT {_fmt_num(float(use_rate_dec))} "
-                    f"PERCENTAGE OF ABOVE AS PER APPLICABLE DTAA."
-                )
-            else:
-                # No DTAA rate available — fall back to 20.80%
-                use_rate_dec = Decimal("20.80")
-                basis_text = IT_ACT_BASIS.get(
-                    20.80,
-                    "GROSS AMOUNT OF REMITTANCE IS CONSIDERED AS TAXABLE INCOME "
-                    "AND TAX LIABILITY IS CALCULATED AT 20.80 PERCENTAGE OF ABOVE.",
-                )
-                logger.info("non_tds_dtaa_rate_unavailable invoice_id=%s fallback=20.80", invoice_id)
-
-        it_liab = chargeable_inr_dec * (use_rate_dec / Decimal("100"))
-        # Preserve user's chargeability choice; default to N for NON_TDS (no TDS withheld).
+    else:
+        # MODE_NON_TDS Flow
         existing_chargeable = str(form.get("RemittanceCharIndia") or "").strip().upper()
         form["RemittanceCharIndia"] = existing_chargeable if existing_chargeable in ("Y", "N") else "N"
-        # Only populate IT Act documentary fields when chargeability is Y.
-        # When user marks N, these fields are suppressed in the final XML anyway, so keep them blank.
+        
         if form["RemittanceCharIndia"] == "Y":
-            form["AmtIncChrgIt"] = _fmt_num(_round_to_int(float(chargeable_inr_dec)))
-            form["TaxLiablIt"] = _fmt_num(_round_to_int(float(it_liab)))
-            form["BasisDeterTax"] = basis_text
+            form["AmtIncChrgIt"] = str(int(res.gross_inr))
+            form["TaxLiablIt"] = str(int(res.it_liability_inr))
+            form["BasisDeterTax"] = res.basis_text
         else:
             form["AmtIncChrgIt"] = ""
             form["TaxLiablIt"] = ""
             form["BasisDeterTax"] = ""
+            
         # DTAA exemption applies — no TDS deducted
-        form["AmtPayForgnTds"] = "0"
+        form["AmtPayForgnTds"] = "0.00"
         form["AmtPayIndianTds"] = "0"
-        form["ActlAmtTdsForgn"] = _fmt_num(fcy)
+        form["ActlAmtTdsForgn"] = f"{res.net_fcy:.2f}"
         # Respect UI selection from Section 9D in NON_TDS (default remains "Y").
         form["OtherRemDtaa"] = str(form.get("OtherRemDtaa") or "Y").strip().upper()
         # Preserve user's 9A/9B/9C selections; the canonical NON_TDS path uses 9D,
@@ -644,16 +674,6 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
             "recompute_non_tds_done invoice_id=%s AmtIncChrgIt=%s TaxLiablIt=%s",
             invoice_id, form["AmtIncChrgIt"], form["TaxLiablIt"],
         )
-    elif mode == MODE_TDS:
-        country_code = str(form.get("CountryRemMadeSecb") or "").strip()
-        skip_reason = "country_blank" if not country_code else "country_selected_rate_missing"
-        logger.warning(
-            "recompute_tds_skipped invoice_id=%s reason=%s country=%s remitter_pan=%s",
-            invoice_id,
-            skip_reason,
-            country_code,
-            str(form.get("RemitterPAN") or ""),
-        )
 
     # Restore Section 8 manual overrides (if any) to preserve UI edits.
     # Skip IT Act numeric/text fields when RemittanceCharIndia=N — blanking them is intentional
@@ -704,6 +724,15 @@ def recompute_invoice(state: Dict[str, object]) -> Dict[str, object]:
     # discrepancy between AmtPayForgnRem and ActlAmtTdsForgn.
     if mode == MODE_NON_TDS:
         form["ActlAmtTdsForgn"] = _fmt_num(fcy)
+
+    # Scrubber: if DTAA is not claimed, strictly eliminate all DTAA tax configuration 
+    # to prevent hidden state dependencies and override leakage.
+    dtaa_claimed = mode == MODE_TDS and form.get("RateTdsSecbFlg") == RATE_TDS_SECB_FLG_DTAA
+    if not dtaa_claimed:
+        computed.pop("dtaa_rate_percent", None)
+        for dtaa_field in ["RelevantDtaa", "RelevantArtDtaa", "TaxIncDtaa", "TaxLiablDtaa", "ArtDtaa", "RateTdsADtaa"]:
+            form[dtaa_field] = ""
+            form.pop(f"_ui_override_sec9_{dtaa_field}", None)
 
     # Final step: round FCY amounts to 2 dp and INR amounts to integer.
     # All intermediate calculations above run at full precision; rounding
@@ -781,10 +810,10 @@ def invoice_state_to_xml_fields(state: Dict[str, object]) -> Dict[str, str]:
             return f"{m.group(1)},{m.group(2)}{m.group(3)}"
         return value
 
-    meta = state.get("meta", {})
-    extracted = state.get("extracted", {})
-    form = state.get("form", {})
-    resolved = state.get("resolved", {})
+    meta = cast(Dict[str, Any], state.get("meta", {}))
+    extracted = cast(Dict[str, Any], state.get("extracted", {}))
+    form = cast(Dict[str, Any], state.get("form", {}))
+    resolved = cast(Dict[str, Any], state.get("resolved", {}))
     mode = str(meta.get("mode") or MODE_TDS)
 
     def _form_or_extracted(form_key: str, extracted_key: str | None = None, default: str = "") -> str:
